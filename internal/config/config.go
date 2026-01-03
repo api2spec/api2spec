@@ -267,7 +267,18 @@ func Default() *Config {
 		Source: SourceConfig{
 			Paths:   []string{"."},
 			Include: []string{"**/*.go"},
-			Exclude: []string{"vendor/**", "**/*_test.go"},
+			Exclude: []string{
+				"vendor/**",
+				"**/*_test.go",
+				"**/testdata/**",
+				"node_modules/**",
+				".git/**",
+				"dist/**",
+				"build/**",
+				"**/*.pb.go",
+				"**/mock*.go",
+				"**/mocks/**",
+			},
 		},
 		Generation: GenerationConfig{
 			Mode:             "full",
@@ -352,7 +363,18 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("openapi.info.version", "1.0.0")
 	v.SetDefault("source.paths", []string{"."})
 	v.SetDefault("source.include", []string{"**/*.go"})
-	v.SetDefault("source.exclude", []string{"vendor/**", "**/*_test.go"})
+	v.SetDefault("source.exclude", []string{
+		"vendor/**",
+		"**/*_test.go",
+		"**/testdata/**",
+		"node_modules/**",
+		".git/**",
+		"dist/**",
+		"build/**",
+		"**/*.pb.go",
+		"**/mock*.go",
+		"**/mocks/**",
+	})
 	v.SetDefault("generation.mode", "full")
 	v.SetDefault("generation.merge", false)
 	v.SetDefault("generation.strictMode", false)

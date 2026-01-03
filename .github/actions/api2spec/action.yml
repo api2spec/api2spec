@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: 2026 api2spec
+# SPDX-License-Identifier: FSL-1.1-MIT
+
+name: 'api2spec'
+description: 'Generate and validate OpenAPI specifications from source code'
+author: 'api2spec'
+
+branding:
+  icon: 'file-text'
+  color: 'blue'
+
+inputs:
+  command:
+    description: 'Command to run (generate, check, diff)'
+    required: true
+    default: 'check'
+  config:
+    description: 'Path to config file'
+    required: false
+    default: ''
+  framework:
+    description: 'Framework override (chi, gin, echo, auto)'
+    required: false
+    default: ''
+  output:
+    description: 'Output file path for generated spec'
+    required: false
+    default: ''
+  format:
+    description: 'Output format (yaml, json)'
+    required: false
+    default: ''
+  strict:
+    description: 'Enable strict mode for check command'
+    required: false
+    default: 'false'
+  verbose:
+    description: 'Enable verbose output'
+    required: false
+    default: 'false'
+  version:
+    description: 'Version of api2spec to use (latest, v1.0.0, etc.)'
+    required: false
+    default: 'latest'
+  working-directory:
+    description: 'Working directory for running api2spec'
+    required: false
+    default: '.'
+
+outputs:
+  spec-path:
+    description: 'Path to the generated OpenAPI spec file'
+    value: ${{ steps.run.outputs.spec-path }}
+  routes-count:
+    description: 'Number of routes extracted'
+    value: ${{ steps.run.outputs.routes-count }}
+  schemas-count:
+    description: 'Number of schemas extracted'
+    value: ${{ steps.run.outputs.schemas-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        cache: true
+
+    - name: Install api2spec
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          go install github.com/api2spec/api2spec@latest
+        else
+          go install github.com/api2spec/api2spec@${{ inputs.version }}
+        fi
+
+    - name: Run api2spec
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Build command arguments
+        ARGS="${{ inputs.command }}"
+
+        # Add config flag if provided
+        if [ -n "${{ inputs.config }}" ]; then
+          ARGS="$ARGS --config ${{ inputs.config }}"
+        fi
+
+        # Add framework flag if provided
+        if [ -n "${{ inputs.framework }}" ]; then
+          ARGS="$ARGS --framework ${{ inputs.framework }}"
+        fi
+
+        # Add output flag if provided
+        if [ -n "${{ inputs.output }}" ]; then
+          ARGS="$ARGS --output ${{ inputs.output }}"
+        fi
+
+        # Add format flag if provided
+        if [ -n "${{ inputs.format }}" ]; then
+          ARGS="$ARGS --format ${{ inputs.format }}"
+        fi
+
+        # Add strict flag for check command
+        if [ "${{ inputs.command }}" = "check" ] && [ "${{ inputs.strict }}" = "true" ]; then
+          ARGS="$ARGS --strict"
+        fi
+
+        # Add verbose flag if enabled
+        if [ "${{ inputs.verbose }}" = "true" ]; then
+          ARGS="$ARGS --verbose"
+        fi
+
+        # Run api2spec
+        echo "Running: api2spec $ARGS"
+        api2spec $ARGS
+
+        # Set outputs for generate command
+        if [ "${{ inputs.command }}" = "generate" ]; then
+          OUTPUT_FILE="${{ inputs.output }}"
+          if [ -z "$OUTPUT_FILE" ]; then
+            OUTPUT_FILE="openapi.yaml"
+          fi
+          echo "spec-path=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+        fi

@@ -39,3 +39,7 @@ Thumbs.db
 # Build artifacts
 dist/
 
+# Generated OpenAPI specs
+openapi.yaml
+openapi.json
+

@@ -533,3 +533,390 @@ func ExtractStringLiteral(expr ast.Expr) (string, bool) {
 	}
 	return s, true
 }
+
+// --- Doc Comment Annotation Parsing ---
+
+// DocAnnotations contains parsed annotations from doc comments.
+// Supports common swagger/openapi annotations like @summary, @description, etc.
+type DocAnnotations struct {
+	// Summary is a brief description of the operation (from @summary)
+	Summary string
+
+	// Description is a detailed description (from @description or first line of comment)
+	Description string
+
+	// Tags are tags for grouping (from @tags)
+	Tags []string
+
+	// Deprecated indicates if the operation is deprecated (from @deprecated)
+	Deprecated bool
+
+	// OperationID is a unique identifier for the operation (from @operationId)
+	OperationID string
+
+	// Parameters are parameter definitions (from @param)
+	Parameters []ParamAnnotation
+
+	// Responses are response definitions (from @success, @failure, @response)
+	Responses []ResponseAnnotation
+
+	// Security are security requirements (from @security)
+	Security []string
+
+	// Accept is the accepted content type (from @accept)
+	Accept string
+
+	// Produce is the produced content type (from @produce)
+	Produce string
+
+	// Router is an explicit route definition (from @router)
+	Router *RouterAnnotation
+}
+
+// ParamAnnotation represents a parsed @param annotation.
+type ParamAnnotation struct {
+	// Name is the parameter name
+	Name string
+
+	// In is the location (path, query, header, body, formData)
+	In string
+
+	// Type is the data type
+	Type string
+
+	// Required indicates if the parameter is required
+	Required bool
+
+	// Description is the parameter description
+	Description string
+}
+
+// ResponseAnnotation represents a parsed @success/@failure annotation.
+type ResponseAnnotation struct {
+	// Code is the HTTP status code
+	Code string
+
+	// Type is the response data type
+	Type string
+
+	// Description is the response description
+	Description string
+}
+
+// RouterAnnotation represents a parsed @router annotation.
+type RouterAnnotation struct {
+	// Path is the route path
+	Path string
+
+	// Method is the HTTP method
+	Method string
+}
+
+// ParseDocComment parses a doc comment string and extracts annotations.
+func ParseDocComment(comment string) *DocAnnotations {
+	if comment == "" {
+		return &DocAnnotations{}
+	}
+
+	annotations := &DocAnnotations{}
+	lines := strings.Split(comment, "\n")
+
+	var descriptionLines []string
+	foundAnnotation := false
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Check for annotations (starting with @)
+		if strings.HasPrefix(line, "@") {
+			foundAnnotation = true
+			parseAnnotationLine(line, annotations)
+		} else if !foundAnnotation {
+			// Lines before first annotation become description
+			descriptionLines = append(descriptionLines, line)
+		}
+	}
+
+	// Set description from non-annotation lines if no @description was found
+	if annotations.Description == "" && len(descriptionLines) > 0 {
+		// Use first line as summary if no @summary
+		if annotations.Summary == "" && len(descriptionLines) > 0 {
+			annotations.Summary = descriptionLines[0]
+		}
+		annotations.Description = strings.Join(descriptionLines, " ")
+	}
+
+	return annotations
+}
+
+// parseAnnotationLine parses a single annotation line.
+func parseAnnotationLine(line string, annotations *DocAnnotations) {
+	// Remove the @ prefix
+	line = strings.TrimPrefix(line, "@")
+
+	// Split into annotation name and value
+	parts := strings.SplitN(line, " ", 2)
+	name := strings.ToLower(parts[0])
+	value := ""
+	if len(parts) > 1 {
+		value = strings.TrimSpace(parts[1])
+	}
+
+	switch name {
+	case "summary":
+		annotations.Summary = value
+
+	case "description", "desc":
+		annotations.Description = value
+
+	case "tags", "tag":
+		// Tags can be comma-separated
+		tags := strings.Split(value, ",")
+		for _, tag := range tags {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				annotations.Tags = append(annotations.Tags, tag)
+			}
+		}
+
+	case "deprecated":
+		annotations.Deprecated = true
+
+	case "operationid", "id":
+		annotations.OperationID = value
+
+	case "param":
+		param := parseParamAnnotation(value)
+		if param != nil {
+			annotations.Parameters = append(annotations.Parameters, *param)
+		}
+
+	case "success", "failure", "response":
+		resp := parseResponseAnnotation(value)
+		if resp != nil {
+			annotations.Responses = append(annotations.Responses, *resp)
+		}
+
+	case "security":
+		if value != "" {
+			annotations.Security = append(annotations.Security, value)
+		}
+
+	case "accept":
+		annotations.Accept = value
+
+	case "produce":
+		annotations.Produce = value
+
+	case "router":
+		router := parseRouterAnnotation(value)
+		if router != nil {
+			annotations.Router = router
+		}
+	}
+}
+
+// parseParamAnnotation parses @param annotation value.
+// Format: name location type required "description"
+// Example: @param id path string true "User ID"
+func parseParamAnnotation(value string) *ParamAnnotation {
+	// Match: name location type required "description"
+	// or: name location type required description (without quotes)
+	parts := splitAnnotationParts(value)
+	if len(parts) < 4 {
+		return nil
+	}
+
+	param := &ParamAnnotation{
+		Name: parts[0],
+		In:   parts[1],
+		Type: parts[2],
+	}
+
+	// Parse required (true/false)
+	param.Required = strings.ToLower(parts[3]) == "true"
+
+	// Remaining parts are description
+	if len(parts) > 4 {
+		param.Description = strings.Join(parts[4:], " ")
+		param.Description = strings.Trim(param.Description, `"`)
+	}
+
+	return param
+}
+
+// parseResponseAnnotation parses @success/@failure annotation value.
+// Format: code {type} description
+// Example: @success 200 {object} User "Successful response"
+func parseResponseAnnotation(value string) *ResponseAnnotation {
+	parts := splitAnnotationParts(value)
+	if len(parts) < 1 {
+		return nil
+	}
+
+	resp := &ResponseAnnotation{
+		Code: parts[0],
+	}
+
+	// Parse type if present (in braces)
+	if len(parts) > 1 {
+		typePart := parts[1]
+		if strings.HasPrefix(typePart, "{") && strings.HasSuffix(typePart, "}") {
+			resp.Type = strings.Trim(typePart, "{}")
+			// Description is everything after
+			if len(parts) > 2 {
+				resp.Description = strings.Join(parts[2:], " ")
+				resp.Description = strings.Trim(resp.Description, `"`)
+			}
+		} else {
+			// No type, rest is description
+			resp.Description = strings.Join(parts[1:], " ")
+			resp.Description = strings.Trim(resp.Description, `"`)
+		}
+	}
+
+	return resp
+}
+
+// parseRouterAnnotation parses @router annotation value.
+// Format: path [method]
+// Example: @router /users/{id} [get]
+func parseRouterAnnotation(value string) *RouterAnnotation {
+	parts := strings.Fields(value)
+	if len(parts) < 2 {
+		return nil
+	}
+
+	router := &RouterAnnotation{
+		Path: parts[0],
+	}
+
+	// Extract method from brackets
+	method := parts[1]
+	if strings.HasPrefix(method, "[") && strings.HasSuffix(method, "]") {
+		router.Method = strings.ToUpper(strings.Trim(method, "[]"))
+	} else {
+		router.Method = strings.ToUpper(method)
+	}
+
+	return router
+}
+
+// splitAnnotationParts splits an annotation value respecting quoted strings.
+func splitAnnotationParts(value string) []string {
+	var parts []string
+	var current strings.Builder
+	inQuotes := false
+
+	for _, r := range value {
+		switch {
+		case r == '"':
+			inQuotes = !inQuotes
+			current.WriteRune(r)
+		case r == ' ' && !inQuotes:
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+
+	return parts
+}
+
+// FindHandlerDoc finds the doc comment for a handler function by name.
+func (p *GoParser) FindHandlerDoc(pf *ParsedFile, handlerName string) *DocAnnotations {
+	// Handle package.FuncName format
+	parts := strings.Split(handlerName, ".")
+	funcName := parts[len(parts)-1]
+
+	for _, decl := range pf.AST.Decls {
+		funcDecl, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+
+		if funcDecl.Name.Name == funcName {
+			if funcDecl.Doc != nil {
+				return ParseDocComment(funcDecl.Doc.Text())
+			}
+			return &DocAnnotations{}
+		}
+	}
+
+	return nil
+}
+
+// FindMethodDoc finds the doc comment for a method by receiver type and method name.
+func (p *GoParser) FindMethodDoc(pf *ParsedFile, receiverType, methodName string) *DocAnnotations {
+	for _, decl := range pf.AST.Decls {
+		funcDecl, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+
+		if funcDecl.Name.Name != methodName {
+			continue
+		}
+
+		// Check receiver
+		if funcDecl.Recv == nil || len(funcDecl.Recv.List) == 0 {
+			continue
+		}
+
+		recv := funcDecl.Recv.List[0]
+		recvTypeName := p.typeToString(recv.Type)
+
+		// Handle pointer receivers
+		recvTypeName = strings.TrimPrefix(recvTypeName, "*")
+
+		if recvTypeName == receiverType {
+			if funcDecl.Doc != nil {
+				return ParseDocComment(funcDecl.Doc.Text())
+			}
+			return &DocAnnotations{}
+		}
+	}
+
+	return nil
+}
+
+// ExtractAllHandlerDocs extracts doc annotations for all functions in a file.
+func (p *GoParser) ExtractAllHandlerDocs(pf *ParsedFile) map[string]*DocAnnotations {
+	result := make(map[string]*DocAnnotations)
+
+	for _, decl := range pf.AST.Decls {
+		funcDecl, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+
+		if funcDecl.Doc == nil {
+			continue
+		}
+
+		annotations := ParseDocComment(funcDecl.Doc.Text())
+
+		// Build function name (with receiver if method)
+		name := funcDecl.Name.Name
+		if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
+			recv := funcDecl.Recv.List[0]
+			recvType := p.typeToString(recv.Type)
+			recvType = strings.TrimPrefix(recvType, "*")
+			name = recvType + "." + name
+		}
+
+		result[name] = annotations
+	}
+
+	return result
+}

@@ -508,3 +508,387 @@ type SomeStruct struct{}
 		})
 	}
 }
+
+// --- Doc Comment Annotation Tests ---
+
+func TestParseDocComment_Summary(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment string
+		want    DocAnnotations
+	}{
+		{
+			name:    "simple summary annotation",
+			comment: "@summary Get user by ID",
+			want: DocAnnotations{
+				Summary: "Get user by ID",
+			},
+		},
+		{
+			name: "summary with description",
+			comment: `@summary Get user by ID
+@description Fetches a single user from the database`,
+			want: DocAnnotations{
+				Summary:     "Get user by ID",
+				Description: "Fetches a single user from the database",
+			},
+		},
+		{
+			name: "description from plain text",
+			comment: `GetUser retrieves a user by ID.
+This is a longer description.`,
+			want: DocAnnotations{
+				Summary:     "GetUser retrieves a user by ID.",
+				Description: "GetUser retrieves a user by ID. This is a longer description.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDocComment(tt.comment)
+			assert.Equal(t, tt.want.Summary, got.Summary)
+			assert.Equal(t, tt.want.Description, got.Description)
+		})
+	}
+}
+
+func TestParseDocComment_Tags(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment string
+		want    []string
+	}{
+		{
+			name:    "single tag",
+			comment: "@tags users",
+			want:    []string{"users"},
+		},
+		{
+			name:    "multiple tags comma separated",
+			comment: "@tags users, admin, auth",
+			want:    []string{"users", "admin", "auth"},
+		},
+		{
+			name: "tag annotation",
+			comment: `@tag users
+@tag admin`,
+			want: []string{"users", "admin"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDocComment(tt.comment)
+			assert.Equal(t, tt.want, got.Tags)
+		})
+	}
+}
+
+func TestParseDocComment_Deprecated(t *testing.T) {
+	comment := `@summary Old endpoint
+@deprecated`
+
+	got := ParseDocComment(comment)
+	assert.True(t, got.Deprecated)
+}
+
+func TestParseDocComment_Param(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment string
+		want    []ParamAnnotation
+	}{
+		{
+			name:    "path parameter",
+			comment: `@param id path string true "User ID"`,
+			want: []ParamAnnotation{
+				{Name: "id", In: "path", Type: "string", Required: true, Description: "User ID"},
+			},
+		},
+		{
+			name:    "query parameter",
+			comment: `@param limit query int false "Maximum results"`,
+			want: []ParamAnnotation{
+				{Name: "limit", In: "query", Type: "int", Required: false, Description: "Maximum results"},
+			},
+		},
+		{
+			name: "multiple parameters",
+			comment: `@param id path string true "User ID"
+@param include query string false "Fields to include"`,
+			want: []ParamAnnotation{
+				{Name: "id", In: "path", Type: "string", Required: true, Description: "User ID"},
+				{Name: "include", In: "query", Type: "string", Required: false, Description: "Fields to include"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDocComment(tt.comment)
+			require.Len(t, got.Parameters, len(tt.want))
+			for i, want := range tt.want {
+				assert.Equal(t, want.Name, got.Parameters[i].Name)
+				assert.Equal(t, want.In, got.Parameters[i].In)
+				assert.Equal(t, want.Type, got.Parameters[i].Type)
+				assert.Equal(t, want.Required, got.Parameters[i].Required)
+				assert.Equal(t, want.Description, got.Parameters[i].Description)
+			}
+		})
+	}
+}
+
+func TestParseDocComment_Responses(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment string
+		want    []ResponseAnnotation
+	}{
+		{
+			name:    "success response with type",
+			comment: `@success 200 {object} User "Successful response"`,
+			want: []ResponseAnnotation{
+				{Code: "200", Type: "object", Description: "User \"Successful response\""},
+			},
+		},
+		{
+			name:    "failure response",
+			comment: `@failure 404 {object} Error "User not found"`,
+			want: []ResponseAnnotation{
+				{Code: "404", Type: "object", Description: "Error \"User not found\""},
+			},
+		},
+		{
+			name: "multiple responses",
+			comment: `@success 200 {object} User "Success"
+@failure 400 {object} Error "Bad request"
+@failure 500 {object} Error "Internal error"`,
+			want: []ResponseAnnotation{
+				{Code: "200", Type: "object"},
+				{Code: "400", Type: "object"},
+				{Code: "500", Type: "object"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDocComment(tt.comment)
+			require.Len(t, got.Responses, len(tt.want))
+			for i, want := range tt.want {
+				assert.Equal(t, want.Code, got.Responses[i].Code)
+				assert.Equal(t, want.Type, got.Responses[i].Type)
+			}
+		})
+	}
+}
+
+func TestParseDocComment_Router(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment string
+		path    string
+		method  string
+	}{
+		{
+			name:    "get router",
+			comment: "@router /users/{id} [get]",
+			path:    "/users/{id}",
+			method:  "GET",
+		},
+		{
+			name:    "post router",
+			comment: "@router /users [post]",
+			path:    "/users",
+			method:  "POST",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDocComment(tt.comment)
+			require.NotNil(t, got.Router)
+			assert.Equal(t, tt.path, got.Router.Path)
+			assert.Equal(t, tt.method, got.Router.Method)
+		})
+	}
+}
+
+func TestParseDocComment_Security(t *testing.T) {
+	comment := `@summary Protected endpoint
+@security BearerAuth
+@security ApiKeyAuth`
+
+	got := ParseDocComment(comment)
+	require.Len(t, got.Security, 2)
+	assert.Equal(t, "BearerAuth", got.Security[0])
+	assert.Equal(t, "ApiKeyAuth", got.Security[1])
+}
+
+func TestParseDocComment_AcceptProduce(t *testing.T) {
+	comment := `@accept json
+@produce json`
+
+	got := ParseDocComment(comment)
+	assert.Equal(t, "json", got.Accept)
+	assert.Equal(t, "json", got.Produce)
+}
+
+func TestParseDocComment_FullExample(t *testing.T) {
+	comment := `GetUser retrieves a user by ID.
+@summary Get user by ID
+@description Fetches a single user from the database by their unique identifier.
+@tags users
+@param id path string true "User ID"
+@success 200 {object} User "User found"
+@failure 404 {object} Error "User not found"
+@security BearerAuth
+@router /users/{id} [get]`
+
+	got := ParseDocComment(comment)
+
+	assert.Equal(t, "Get user by ID", got.Summary)
+	assert.Equal(t, "Fetches a single user from the database by their unique identifier.", got.Description)
+	assert.Equal(t, []string{"users"}, got.Tags)
+
+	require.Len(t, got.Parameters, 1)
+	assert.Equal(t, "id", got.Parameters[0].Name)
+	assert.Equal(t, "path", got.Parameters[0].In)
+	assert.True(t, got.Parameters[0].Required)
+
+	require.Len(t, got.Responses, 2)
+	assert.Equal(t, "200", got.Responses[0].Code)
+	assert.Equal(t, "404", got.Responses[1].Code)
+
+	require.Len(t, got.Security, 1)
+	assert.Equal(t, "BearerAuth", got.Security[0])
+
+	require.NotNil(t, got.Router)
+	assert.Equal(t, "/users/{id}", got.Router.Path)
+	assert.Equal(t, "GET", got.Router.Method)
+}
+
+func TestGoParser_FindHandlerDoc(t *testing.T) {
+	source := `package handlers
+
+// GetUser retrieves a user by ID.
+// @summary Get user by ID
+// @description Fetches a single user from the database
+// @tags users
+// @param id path string true "User ID"
+// @success 200 {object} User
+// @failure 404 {object} Error
+func GetUser(w http.ResponseWriter, r *http.Request) {
+}
+
+// CreateUser creates a new user.
+// @summary Create a new user
+// @tags users
+// @param body body CreateUserRequest true "User data"
+// @success 201 {object} User
+func CreateUser(w http.ResponseWriter, r *http.Request) {
+}
+
+// NoDocHandler has no documentation.
+func NoDocHandler(w http.ResponseWriter, r *http.Request) {
+}
+`
+
+	p := NewGoParser()
+	pf, err := p.ParseSource("handlers.go", source)
+	require.NoError(t, err)
+
+	// Test GetUser
+	getUserDoc := p.FindHandlerDoc(pf, "GetUser")
+	require.NotNil(t, getUserDoc)
+	assert.Equal(t, "Get user by ID", getUserDoc.Summary)
+	assert.Equal(t, []string{"users"}, getUserDoc.Tags)
+	require.Len(t, getUserDoc.Parameters, 1)
+	assert.Equal(t, "id", getUserDoc.Parameters[0].Name)
+
+	// Test CreateUser
+	createUserDoc := p.FindHandlerDoc(pf, "CreateUser")
+	require.NotNil(t, createUserDoc)
+	assert.Equal(t, "Create a new user", createUserDoc.Summary)
+
+	// Test NoDocHandler - has plain doc comment (no annotations)
+	noDocHandler := p.FindHandlerDoc(pf, "NoDocHandler")
+	require.NotNil(t, noDocHandler)
+	// The plain text becomes the summary
+	assert.Equal(t, "NoDocHandler has no documentation.", noDocHandler.Summary)
+
+	// Test non-existent handler
+	nonExistent := p.FindHandlerDoc(pf, "NonExistent")
+	assert.Nil(t, nonExistent)
+}
+
+func TestGoParser_ExtractAllHandlerDocs(t *testing.T) {
+	source := `package handlers
+
+// GetUser retrieves a user.
+// @summary Get user
+// @tags users
+func GetUser() {}
+
+// CreateUser creates a user.
+// @summary Create user
+// @tags users
+func CreateUser() {}
+
+type API struct{}
+
+// ListUsers lists all users.
+// @summary List users
+// @tags users
+func (a *API) ListUsers() {}
+`
+
+	p := NewGoParser()
+	pf, err := p.ParseSource("handlers.go", source)
+	require.NoError(t, err)
+
+	docs := p.ExtractAllHandlerDocs(pf)
+
+	assert.Len(t, docs, 3)
+	assert.NotNil(t, docs["GetUser"])
+	assert.Equal(t, "Get user", docs["GetUser"].Summary)
+
+	assert.NotNil(t, docs["CreateUser"])
+	assert.Equal(t, "Create user", docs["CreateUser"].Summary)
+
+	// Method with receiver
+	assert.NotNil(t, docs["API.ListUsers"])
+	assert.Equal(t, "List users", docs["API.ListUsers"].Summary)
+}
+
+func TestSplitAnnotationParts(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "simple",
+			input: "id path string true",
+			want:  []string{"id", "path", "string", "true"},
+		},
+		{
+			name:  "with quoted string",
+			input: `id path string true "User ID"`,
+			want:  []string{"id", "path", "string", "true", `"User ID"`},
+		},
+		{
+			name:  "quoted with spaces",
+			input: `name query string false "Full name of user"`,
+			want:  []string{"name", "query", "string", "false", `"Full name of user"`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitAnnotationParts(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

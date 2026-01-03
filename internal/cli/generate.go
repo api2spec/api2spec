@@ -14,7 +14,9 @@ import (
 	"github.com/api2spec/api2spec/internal/config"
 	"github.com/api2spec/api2spec/internal/openapi"
 	"github.com/api2spec/api2spec/internal/plugins"
-	_ "github.com/api2spec/api2spec/internal/plugins/chi" // Register chi plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/chi"  // Register chi plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/echo" // Register echo plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/gin"  // Register gin plugin
 	"github.com/api2spec/api2spec/internal/scanner"
 	"github.com/api2spec/api2spec/pkg/types"
 )

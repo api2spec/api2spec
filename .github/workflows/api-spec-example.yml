@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026 api2spec
+# SPDX-License-Identifier: FSL-1.1-MIT
+
+# Example workflow for using api2spec in GitHub Actions
+# This can be used as a reference for integrating api2spec into your CI/CD pipeline
+
+name: API Spec CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Validate that the OpenAPI spec is up-to-date with source code
+  validate-spec:
+    name: Validate OpenAPI Spec
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install api2spec
+        run: go install github.com/api2spec/api2spec@latest
+
+      - name: Check API spec is up-to-date
+        run: |
+          # Generate a fresh spec
+          api2spec generate --output openapi-generated.yaml
+
+          # Compare with committed spec
+          if [ -f openapi.yaml ]; then
+            api2spec diff openapi.yaml openapi-generated.yaml
+          else
+            echo "No existing openapi.yaml found, skipping diff"
+          fi
+
+  # Run strict validation on the spec
+  strict-check:
+    name: Strict API Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install api2spec
+        run: go install github.com/api2spec/api2spec@latest
+
+      - name: Run strict check
+        run: api2spec check --strict
+
+  # Generate and upload spec as artifact (useful for documentation)
+  generate-spec:
+    name: Generate OpenAPI Spec
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install api2spec
+        run: go install github.com/api2spec/api2spec@latest
+
+      - name: Generate OpenAPI spec
+        run: |
+          api2spec generate --output openapi.yaml --verbose
+          api2spec generate --output openapi.json --format json
+
+      - name: Upload spec artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-spec
+          path: |
+            openapi.yaml
+            openapi.json
+          retention-days: 30
+
+  # Example of using the api2spec action directly
+  using-action:
+    name: Using api2spec Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check API spec
+        uses: ./.github/actions/api2spec
+        with:
+          command: check
+          strict: 'true'
+          verbose: 'true'
+
+      - name: Generate API spec
+        uses: ./.github/actions/api2spec
+        with:
+          command: generate
+          output: api-spec.yaml
+          format: yaml
+
+  # Example with different frameworks
+  multi-framework:
+    name: Multi-Framework Check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        framework: [chi, gin, echo]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install api2spec
+        run: go install github.com/api2spec/api2spec@latest
+
+      - name: Check with ${{ matrix.framework }} framework
+        run: api2spec check --framework ${{ matrix.framework }} || true
+        # Using || true to not fail if framework doesn't match the project
