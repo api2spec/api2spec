@@ -62,7 +62,7 @@ api2spec diff
 
 ## Supported Frameworks
 
-**23 frameworks across 11 languages** - with more being added regularly.
+**29 frameworks across 11 languages** - with more being added regularly.
 
 ### Go
 
@@ -90,6 +90,7 @@ api2spec diff
 |-----------|-----------|----------------|
 | **FastAPI** | `fastapi` in requirements.txt/pyproject.toml | Pydantic models |
 | **Flask** | `flask` in requirements.txt/pyproject.toml | Type hints |
+| **Django REST Framework** | `djangorestframework` in requirements.txt | DRF Serializers |
 
 ### Rust
 
@@ -104,23 +105,23 @@ api2spec diff
 | Framework | Detection | Schema Support |
 |-----------|-----------|----------------|
 | **ASP.NET Core** | `Microsoft.AspNetCore` in *.csproj | DTOs, records |
+| **FastEndpoints** | `FastEndpoints` in *.csproj | Request/Response DTOs |
+| **Nancy** | `Nancy` in *.csproj | C# classes |
 
 ### PHP
 
 | Framework | Detection | Schema Support |
 |-----------|-----------|----------------|
 | **Laravel** | `laravel/framework` in composer.json | Request classes |
+| **Symfony** | `symfony/framework-bundle` in composer.json | Request classes |
+| **Slim** | `slim/slim` in composer.json | Plain PHP |
 
-### Java
+### Java/Kotlin
 
 | Framework | Detection | Schema Support |
 |-----------|-----------|----------------|
 | **Spring Boot** | `spring-boot` in pom.xml/build.gradle | DTOs, records |
-
-### Kotlin
-
-| Framework | Detection | Schema Support |
-|-----------|-----------|----------------|
+| **Micronaut** | `io.micronaut` in build.gradle/pom.xml | DTOs, data classes |
 | **Ktor** | `io.ktor` in build.gradle.kts | Data classes |
 
 ### Elixir
