@@ -62,6 +62,8 @@ api2spec diff
 
 ## Supported Frameworks
 
+**23 frameworks across 11 languages** - with more being added regularly.
+
 ### Go
 
 | Framework | Detection | Schema Support |
@@ -95,6 +97,50 @@ api2spec diff
 |-----------|-----------|----------------|
 | **Axum** | `axum` in Cargo.toml | Rust structs + serde |
 | **Actix-web** | `actix-web` in Cargo.toml | Rust structs + serde |
+| **Rocket** | `rocket` in Cargo.toml | Rust structs + serde |
+
+### C#
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **ASP.NET Core** | `Microsoft.AspNetCore` in *.csproj | DTOs, records |
+
+### PHP
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Laravel** | `laravel/framework` in composer.json | Request classes |
+
+### Java
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Spring Boot** | `spring-boot` in pom.xml/build.gradle | DTOs, records |
+
+### Kotlin
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Ktor** | `io.ktor` in build.gradle.kts | Data classes |
+
+### Elixir
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Phoenix** | `:phoenix` in mix.exs | Ecto schemas |
+
+### Ruby
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Rails** | `rails` in Gemfile | ActiveRecord models |
+| **Sinatra** | `sinatra` in Gemfile | Plain Ruby |
+
+### Gleam
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Wisp** | `wisp` in gleam.toml | Gleam types |
 
 ## Commands
 

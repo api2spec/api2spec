@@ -15,6 +15,7 @@ import (
 	"github.com/api2spec/api2spec/internal/openapi"
 	"github.com/api2spec/api2spec/internal/plugins"
 	_ "github.com/api2spec/api2spec/internal/plugins/actix"   // Register actix plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/aspnet"  // Register aspnet plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/axum"    // Register axum plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/chi"     // Register chi plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/echo"    // Register echo plugin
@@ -25,9 +26,17 @@ import (
 	_ "github.com/api2spec/api2spec/internal/plugins/fiber"   // Register fiber plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/flask"   // Register flask plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/gin"     // Register gin plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/gleam"   // Register gleam plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/hono"    // Register hono plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/koa"     // Register koa plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/ktor"    // Register ktor plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/laravel" // Register laravel plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/nestjs"  // Register nestjs plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/phoenix" // Register phoenix plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/rails"   // Register rails plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/rocket"  // Register rocket plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/sinatra" // Register sinatra plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/spring"  // Register spring plugin
 	"github.com/api2spec/api2spec/internal/scanner"
 	"github.com/api2spec/api2spec/pkg/types"
 )
