@@ -15,7 +15,7 @@ type SourceFile struct {
 	// Path is the absolute path to the file
 	Path string
 
-	// Language is the detected programming language ("go", "typescript", "javascript")
+	// Language is the detected programming language ("go", "typescript", "javascript", "python", "rust")
 	Language string
 
 	// Content is the file content
@@ -36,6 +36,9 @@ var languageExtensions = map[string]string{
 	".jsx": "javascript",
 	".mjs": "javascript",
 	".cjs": "javascript",
+	".py":  "python",
+	".pyw": "python",
+	".rs":  "rust",
 }
 
 // DetectLanguage detects the programming language from a file path.

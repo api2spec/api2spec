@@ -4,12 +4,12 @@ Code-first OpenAPI specification generator for frameworks that don't hold your h
 
 ## Overview
 
-api2spec analyzes your API code and generates OpenAPI 3.1 specifications automatically. It bridges the gap between code-first frameworks (Hono, Express, Go chi/gin/echo, etc.) and the OpenAPI ecosystem (Scalar, Redoc, Swagger UI).
+api2spec analyzes your API code and generates OpenAPI 3.1 specifications automatically. It uses **tree-sitter** for static analysis - no runtime dependencies needed, perfect for CI/CD pipelines.
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │  Your Code      │────▶│    api2spec      │────▶│  openapi.yaml   │
-│  (Hono/Go/etc)  │     │  Parse + Infer   │     │  (auto-synced)  │
+│  (Any Framework)│     │  Parse + Infer   │     │  (auto-synced)  │
 └─────────────────┘     └──────────────────┘     └────────┬────────┘
                                                           │
                                                           ▼
@@ -44,8 +44,8 @@ go build ./cmd/api2spec
 ## Quick Start
 
 ```bash
-# Initialize config in your project
-api2spec init --framework chi
+# Initialize config (auto-detects framework)
+api2spec init
 
 # Generate OpenAPI spec
 api2spec generate
@@ -53,9 +53,48 @@ api2spec generate
 # Watch for changes
 api2spec watch
 
-# Validate spec matches code
+# Validate spec matches code (for CI)
 api2spec check --ci
+
+# Show differences
+api2spec diff
 ```
+
+## Supported Frameworks
+
+### Go
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **chi** | `go-chi/chi` in go.mod | Go structs + validate tags |
+| **gin** | `gin-gonic/gin` in go.mod | Go structs + binding tags |
+| **echo** | `labstack/echo` in go.mod | Go structs + validate tags |
+| **fiber** | `gofiber/fiber` in go.mod | Go structs + validate tags |
+
+### TypeScript/JavaScript
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Hono** | `hono` in package.json | Zod schemas |
+| **Express** | `express` in package.json | express-validator, Zod |
+| **Fastify** | `fastify` in package.json | Built-in JSON Schema, Zod |
+| **Koa** | `koa` in package.json | Zod schemas |
+| **Elysia** | `elysia` in package.json | TypeBox, Zod |
+| **NestJS** | `@nestjs/core` in package.json | class-validator DTOs |
+
+### Python
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **FastAPI** | `fastapi` in requirements.txt/pyproject.toml | Pydantic models |
+| **Flask** | `flask` in requirements.txt/pyproject.toml | Type hints |
+
+### Rust
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Axum** | `axum` in Cargo.toml | Rust structs + serde |
+| **Actix-web** | `actix-web` in Cargo.toml | Rust structs + serde |
 
 ## Commands
 
@@ -79,13 +118,17 @@ api2spec looks for configuration in this order:
 Example configuration:
 
 ```yaml
-framework: chi
+framework: chi  # or auto-detect
 
-entry:
-  - ./internal/api/**/*.go
-
-exclude:
-  - "**/*_test.go"
+source:
+  paths:
+    - ./internal/api
+    - ./cmd/server
+  include:
+    - "**/*.go"
+  exclude:
+    - "**/*_test.go"
+    - "**/mocks/**"
 
 output:
   path: openapi.yaml
@@ -100,24 +143,36 @@ openapi:
       description: Development
 ```
 
-## Supported Frameworks
+## CI/CD Integration
 
-### Go
-| Framework | Status |
-|-----------|--------|
-| chi | Priority |
-| gin | Planned |
-| echo | Planned |
-| fiber | Planned |
-| gorilla/mux | Planned |
-| net/http | Planned |
+### GitHub Actions
 
-### TypeScript/JavaScript
-| Framework | Status |
-|-----------|--------|
-| Hono | Priority |
-| Express | Planned |
-| Fastify | Planned |
+```yaml
+- name: Check API spec
+  run: |
+    go install github.com/api2spec/api2spec@latest
+    api2spec check --ci
+```
+
+### Pre-commit Hook
+
+```bash
+#!/bin/sh
+api2spec check --strict || exit 1
+```
+
+## Why Tree-sitter?
+
+api2spec uses tree-sitter for static source code analysis instead of runtime reflection:
+
+| Feature | Tree-sitter (api2spec) | Runtime Reflection |
+|---------|------------------------|-------------------|
+| Dependencies | None needed | Full environment |
+| Speed | Fast - just parses | Slower - runs code |
+| Safety | No code execution | Executes imports |
+| CI/CD | Perfect fit | Needs setup |
+
+This makes api2spec ideal for CI pipelines where you don't want to install framework dependencies just to generate documentation.
 
 ## Development
 

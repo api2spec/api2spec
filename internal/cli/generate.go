@@ -14,14 +14,20 @@ import (
 	"github.com/api2spec/api2spec/internal/config"
 	"github.com/api2spec/api2spec/internal/openapi"
 	"github.com/api2spec/api2spec/internal/plugins"
+	_ "github.com/api2spec/api2spec/internal/plugins/actix"   // Register actix plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/axum"    // Register axum plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/chi"     // Register chi plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/echo"    // Register echo plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/elysia"  // Register elysia plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/express" // Register express plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/fastapi" // Register fastapi plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/fastify" // Register fastify plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/fiber"   // Register fiber plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/flask"   // Register flask plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/gin"     // Register gin plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/hono"    // Register hono plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/koa"     // Register koa plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/nestjs"  // Register nestjs plugin
 	"github.com/api2spec/api2spec/internal/scanner"
 	"github.com/api2spec/api2spec/pkg/types"
 )
