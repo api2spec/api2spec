@@ -1,0 +1,546 @@
+// SPDX-FileCopyrightText: 2026 api2spec
+// SPDX-License-Identifier: FSL-1.1-MIT
+
+// Package chi provides a plugin for extracting routes from chi router applications.
+package chi
+
+import (
+	"bufio"
+	"fmt"
+	"go/ast"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/api2spec/api2spec/internal/parser"
+	"github.com/api2spec/api2spec/internal/plugins"
+	"github.com/api2spec/api2spec/internal/scanner"
+	"github.com/api2spec/api2spec/internal/schema"
+	"github.com/api2spec/api2spec/pkg/types"
+)
+
+// chiImportPaths are the known import paths for chi router.
+var chiImportPaths = []string{
+	"github.com/go-chi/chi",
+	"github.com/go-chi/chi/v5",
+}
+
+// httpMethods are the HTTP methods supported by chi router.
+var httpMethods = map[string]bool{
+	"Get":     true,
+	"Post":    true,
+	"Put":     true,
+	"Delete":  true,
+	"Patch":   true,
+	"Head":    true,
+	"Options": true,
+	"Trace":   true,
+	"Connect": true,
+}
+
+// Plugin implements the FrameworkPlugin interface for chi router.
+type Plugin struct {
+	goParser        *parser.GoParser
+	schemaExtractor *schema.GoSchemaExtractor
+}
+
+// New creates a new chi plugin instance.
+func New() *Plugin {
+	return &Plugin{
+		goParser:        parser.NewGoParser(),
+		schemaExtractor: schema.NewGoSchemaExtractor(),
+	}
+}
+
+// Name returns the plugin identifier.
+func (p *Plugin) Name() string {
+	return "chi"
+}
+
+// Extensions returns the file extensions this plugin handles.
+func (p *Plugin) Extensions() []string {
+	return []string{".go"}
+}
+
+// Info returns plugin metadata.
+func (p *Plugin) Info() plugins.PluginInfo {
+	return plugins.PluginInfo{
+		Name:        "chi",
+		Version:     "1.0.0",
+		Description: "Extracts routes from chi router applications",
+		SupportedFrameworks: []string{
+			"github.com/go-chi/chi",
+			"github.com/go-chi/chi/v5",
+		},
+	}
+}
+
+// Detect checks if chi is used in the project by looking at go.mod.
+func (p *Plugin) Detect(projectRoot string) (bool, error) {
+	goModPath := filepath.Join(projectRoot, "go.mod")
+
+	file, err := os.Open(goModPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to open go.mod: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		for _, importPath := range chiImportPaths {
+			if strings.Contains(line, importPath) {
+				return true, nil
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("failed to read go.mod: %w", err)
+	}
+
+	return false, nil
+}
+
+// ExtractRoutes parses source files and extracts chi route definitions.
+func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error) {
+	var routes []types.Route
+
+	for _, file := range files {
+		if file.Language != "go" {
+			continue
+		}
+
+		fileRoutes, err := p.extractRoutesFromFile(file)
+		if err != nil {
+			// Log error but continue with other files
+			continue
+		}
+
+		routes = append(routes, fileRoutes...)
+	}
+
+	return routes, nil
+}
+
+// extractRoutesFromFile extracts routes from a single Go file.
+func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) ([]types.Route, error) {
+	pf, err := p.goParser.ParseSource(file.Path, string(file.Content))
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if this file imports chi
+	if !p.hasChiImport(pf) {
+		return nil, nil
+	}
+
+	// Find route definitions
+	var routes []types.Route
+
+	// Track route groups and prefixes
+	ctx := &extractionContext{
+		file:      pf,
+		parser:    p.goParser,
+		prefixStack: []string{},
+	}
+
+	ast.Inspect(pf.AST, func(n ast.Node) bool {
+		if n == nil {
+			return true
+		}
+
+		// Look for function declarations that might set up routes
+		if funcDecl, ok := n.(*ast.FuncDecl); ok {
+			funcRoutes := p.extractRoutesFromFunc(funcDecl, ctx)
+			routes = append(routes, funcRoutes...)
+		}
+
+		return true
+	})
+
+	// Set source file for all routes
+	for i := range routes {
+		routes[i].SourceFile = file.Path
+	}
+
+	return routes, nil
+}
+
+// extractionContext tracks context during route extraction.
+type extractionContext struct {
+	file        *parser.ParsedFile
+	parser      *parser.GoParser
+	prefixStack []string
+}
+
+// currentPrefix returns the current route prefix.
+func (ctx *extractionContext) currentPrefix() string {
+	return strings.Join(ctx.prefixStack, "")
+}
+
+// extractRoutesFromFunc extracts routes from a function body.
+func (p *Plugin) extractRoutesFromFunc(funcDecl *ast.FuncDecl, ctx *extractionContext) []types.Route {
+	var routes []types.Route
+
+	if funcDecl.Body == nil {
+		return routes
+	}
+
+	// Walk the function body looking for method calls
+	ast.Inspect(funcDecl.Body, func(n ast.Node) bool {
+		callExpr, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		selExpr, ok := callExpr.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+
+		methodName := selExpr.Sel.Name
+
+		// Check for Route() and Group() calls
+		if methodName == "Route" || methodName == "Group" {
+			nestedRoutes := p.handleRouteGroup(callExpr, methodName, ctx)
+			routes = append(routes, nestedRoutes...)
+			return false // Don't recurse into this, we handled it
+		}
+
+		// Check for Mount() calls
+		if methodName == "Mount" {
+			// Mount attaches a sub-router but we can't easily trace into it
+			// Just record the mount point for informational purposes
+			return true
+		}
+
+		// Check for HTTP method calls
+		if httpMethods[methodName] {
+			route := p.extractRouteFromCall(callExpr, methodName, ctx)
+			if route != nil {
+				routes = append(routes, *route)
+			}
+		}
+
+		return true
+	})
+
+	return routes
+}
+
+// handleRouteGroup handles r.Route("/prefix", func(r chi.Router) { ... }) calls.
+func (p *Plugin) handleRouteGroup(callExpr *ast.CallExpr, methodName string, ctx *extractionContext) []types.Route {
+	var routes []types.Route
+
+	// Extract the prefix (first argument for Route, none for Group)
+	var prefix string
+	var funcLitIdx int
+
+	if methodName == "Route" {
+		if len(callExpr.Args) < 2 {
+			return routes
+		}
+		if path, ok := parser.ExtractStringLiteral(callExpr.Args[0]); ok {
+			prefix = path
+		}
+		funcLitIdx = 1
+	} else { // Group
+		if len(callExpr.Args) < 1 {
+			return routes
+		}
+		funcLitIdx = 0
+	}
+
+	// Get the function literal
+	if funcLitIdx >= len(callExpr.Args) {
+		return routes
+	}
+
+	funcLit, ok := callExpr.Args[funcLitIdx].(*ast.FuncLit)
+	if !ok {
+		return routes
+	}
+
+	// Push prefix onto stack
+	ctx.prefixStack = append(ctx.prefixStack, prefix)
+
+	// Extract routes from the nested function
+	ast.Inspect(funcLit.Body, func(n ast.Node) bool {
+		nestedCall, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		selExpr, ok := nestedCall.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+
+		nestedMethod := selExpr.Sel.Name
+
+		// Handle nested Route/Group
+		if nestedMethod == "Route" || nestedMethod == "Group" {
+			nestedRoutes := p.handleRouteGroup(nestedCall, nestedMethod, ctx)
+			routes = append(routes, nestedRoutes...)
+			return false
+		}
+
+		// Handle HTTP methods
+		if httpMethods[nestedMethod] {
+			route := p.extractRouteFromCall(nestedCall, nestedMethod, ctx)
+			if route != nil {
+				routes = append(routes, *route)
+			}
+		}
+
+		return true
+	})
+
+	// Pop prefix from stack
+	ctx.prefixStack = ctx.prefixStack[:len(ctx.prefixStack)-1]
+
+	return routes
+}
+
+// extractRouteFromCall extracts a Route from an HTTP method call.
+func (p *Plugin) extractRouteFromCall(callExpr *ast.CallExpr, method string, ctx *extractionContext) *types.Route {
+	if len(callExpr.Args) < 1 {
+		return nil
+	}
+
+	// First argument is the path
+	path, ok := parser.ExtractStringLiteral(callExpr.Args[0])
+	if !ok {
+		return nil
+	}
+
+	// Combine with prefix
+	fullPath := ctx.currentPrefix() + path
+
+	// Normalize path
+	fullPath = normalizePath(fullPath)
+
+	// Extract handler name if present
+	var handlerName string
+	if len(callExpr.Args) >= 2 {
+		handlerName = p.extractHandlerName(callExpr.Args[1])
+	}
+
+	// Extract path parameters
+	params := extractPathParams(fullPath)
+
+	// Generate operation ID
+	operationID := generateOperationID(method, fullPath, handlerName)
+
+	// Infer tags from path
+	tags := inferTags(fullPath)
+
+	route := &types.Route{
+		Method:      strings.ToUpper(method),
+		Path:        fullPath,
+		Handler:     handlerName,
+		OperationID: operationID,
+		Tags:        tags,
+		Parameters:  params,
+		SourceLine:  ctx.file.FileSet.Position(callExpr.Pos()).Line,
+	}
+
+	return route
+}
+
+// extractHandlerName extracts the handler function name from an expression.
+func (p *Plugin) extractHandlerName(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		// e.g., handlers.GetUser
+		if ident, ok := e.X.(*ast.Ident); ok {
+			return ident.Name + "." + e.Sel.Name
+		}
+		return e.Sel.Name
+	case *ast.FuncLit:
+		return "<anonymous>"
+	case *ast.CallExpr:
+		// e.g., middleware(handler)
+		return "<wrapped>"
+	default:
+		return ""
+	}
+}
+
+// hasChiImport checks if the file imports chi.
+func (p *Plugin) hasChiImport(pf *parser.ParsedFile) bool {
+	for _, importPath := range chiImportPaths {
+		if p.goParser.HasImport(pf, importPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExtractSchemas extracts schema definitions from Go structs.
+func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
+	for _, file := range files {
+		if file.Language != "go" {
+			continue
+		}
+
+		pf, err := p.goParser.ParseSource(file.Path, string(file.Content))
+		if err != nil {
+			continue
+		}
+
+		structs := p.goParser.ExtractStructs(pf)
+		for _, def := range structs {
+			p.schemaExtractor.ExtractFromStruct(def)
+		}
+	}
+
+	return p.schemaExtractor.Registry().ToSlice(), nil
+}
+
+// --- Helper Functions ---
+
+// normalizePath normalizes a route path.
+func normalizePath(path string) string {
+	// Ensure path starts with /
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	// Remove double slashes
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+
+	// Remove trailing slash (except for root)
+	if len(path) > 1 && strings.HasSuffix(path, "/") {
+		path = path[:len(path)-1]
+	}
+
+	return path
+}
+
+// pathParamRegex matches chi path parameters like {id} or {userId}.
+var pathParamRegex = regexp.MustCompile(`\{([^}]+)\}`)
+
+// extractPathParams extracts path parameters from a route path.
+func extractPathParams(path string) []types.Parameter {
+	var params []types.Parameter
+
+	matches := pathParamRegex.FindAllStringSubmatch(path, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+
+		paramName := match[1]
+
+		// Check for regex pattern in param (e.g., {id:[0-9]+})
+		if idx := strings.Index(paramName, ":"); idx > 0 {
+			paramName = paramName[:idx]
+		}
+
+		params = append(params, types.Parameter{
+			Name:     paramName,
+			In:       "path",
+			Required: true,
+			Schema: &types.Schema{
+				Type: "string",
+			},
+		})
+	}
+
+	return params
+}
+
+// generateOperationID generates an operation ID from method, path, and handler.
+func generateOperationID(method, path, handler string) string {
+	// If we have a handler name, use it
+	if handler != "" && handler != "<anonymous>" && handler != "<wrapped>" {
+		// Remove package prefix and clean up
+		parts := strings.Split(handler, ".")
+		name := parts[len(parts)-1]
+		return strings.ToLower(method) + name
+	}
+
+	// Generate from path
+	// Remove parameter syntax and convert to camelCase
+	path = pathParamRegex.ReplaceAllString(path, "By${1}")
+	path = strings.ReplaceAll(path, "/", " ")
+	path = strings.TrimSpace(path)
+
+	words := strings.Fields(path)
+	if len(words) == 0 {
+		return strings.ToLower(method)
+	}
+
+	// Build camelCase operation ID
+	var sb strings.Builder
+	sb.WriteString(strings.ToLower(method))
+
+	for _, word := range words {
+		word = strings.Title(strings.ToLower(word))
+		sb.WriteString(word)
+	}
+
+	return sb.String()
+}
+
+// inferTags infers tags from the route path.
+func inferTags(path string) []string {
+	// Remove leading slash and split
+	path = strings.TrimPrefix(path, "/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		return nil
+	}
+
+	// Skip common prefixes like "api", "v1", etc.
+	skipPrefixes := map[string]bool{
+		"api": true,
+		"v1":  true,
+		"v2":  true,
+		"v3":  true,
+	}
+
+	// Find the first meaningful segment
+	var tagPart string
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		// Skip version/api prefixes
+		if skipPrefixes[part] {
+			continue
+		}
+		// Skip if it's a parameter
+		if strings.HasPrefix(part, "{") {
+			continue
+		}
+		tagPart = part
+		break
+	}
+
+	if tagPart == "" {
+		return nil
+	}
+
+	return []string{tagPart}
+}
+
+// Register registers the chi plugin with the global registry.
+func Register() {
+	plugins.MustRegister(New())
+}
+
+func init() {
+	Register()
+}

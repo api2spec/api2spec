@@ -13,6 +13,8 @@ import (
 
 	"github.com/api2spec/api2spec/internal/config"
 	"github.com/api2spec/api2spec/internal/openapi"
+	"github.com/api2spec/api2spec/internal/plugins"
+	_ "github.com/api2spec/api2spec/internal/plugins/chi" // Register chi plugin
 	"github.com/api2spec/api2spec/internal/scanner"
 	"github.com/api2spec/api2spec/pkg/types"
 )
@@ -38,12 +40,17 @@ Modes:
   routes-only  Generate only route definitions
   schemas-only Generate only schema definitions
 
+Frameworks:
+  chi          go-chi/chi router (auto-detected)
+  auto         Auto-detect framework (default)
+
 Example:
   api2spec generate                           # Generate from current directory
   api2spec generate ./cmd ./internal          # Generate from specific paths
   api2spec generate --mode routes-only        # Generate routes only
   api2spec generate --merge                   # Merge with existing spec
-  api2spec generate --dry-run                 # Preview without writing`,
+  api2spec generate --dry-run                 # Preview without writing
+  api2spec generate --framework chi           # Use chi plugin explicitly`,
 	RunE: runGenerate,
 }
 
@@ -107,6 +114,32 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		printInfo("Dry run mode - no files will be written")
 	}
 
+	// Determine project root for framework detection
+	projectRoot, err := filepath.Abs(".")
+	if err != nil {
+		return fmt.Errorf("failed to determine project root: %w", err)
+	}
+
+	// Get or detect framework plugin
+	var plugin plugins.FrameworkPlugin
+	if cfg.Framework == "" || cfg.Framework == "auto" {
+		printVerbose("Auto-detecting framework...")
+		plugin, err = plugins.Detect(projectRoot)
+		if err != nil {
+			printVerbose("Framework detection failed: %v", err)
+			printInfo("No framework detected. Available plugins: %s", strings.Join(plugins.List(), ", "))
+			printInfo("Use --framework to specify a framework or ensure go.mod contains framework imports")
+		} else {
+			printInfo("Detected framework: %s", plugin.Name())
+		}
+	} else {
+		plugin = plugins.Get(cfg.Framework)
+		if plugin == nil {
+			return fmt.Errorf("unknown framework %q. Available: %s", cfg.Framework, strings.Join(plugins.List(), ", "))
+		}
+		printVerbose("Using framework: %s", plugin.Name())
+	}
+
 	// Create scanner with config
 	scannerCfg := scanner.Config{
 		IncludePatterns: cfg.Source.Include,
@@ -142,7 +175,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	printInfo("Found %d source files to analyze", len(files))
 
-	// Group files by language for future parser dispatch
+	// Group files by language for display
 	byLanguage := make(map[string][]scanner.SourceFile)
 	for _, f := range files {
 		byLanguage[f.Language] = append(byLanguage[f.Language], f)
@@ -152,19 +185,46 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		printVerbose("  %s: %d files", lang, len(langFiles))
 	}
 
-	// TODO: Implement actual parsing logic
-	// For now, we create an empty spec structure
-	// Future: parsers will extract routes and schemas from files
+	// Extract routes and schemas using plugin
+	var routes []types.Route
+	var schemas []types.Schema
 
-	printInfo("Parsing source files... (parser not yet implemented)")
-	printInfo("Creating empty OpenAPI specification with config values")
+	if plugin != nil {
+		printInfo("Extracting routes and schemas using %s plugin...", plugin.Name())
+
+		// Extract routes (if mode allows)
+		if cfg.Generation.Mode == "full" || cfg.Generation.Mode == "routes-only" {
+			extractedRoutes, err := plugin.ExtractRoutes(files)
+			if err != nil {
+				return fmt.Errorf("failed to extract routes: %w", err)
+			}
+			routes = extractedRoutes
+			printInfo("Found %d routes", len(routes))
+
+			for _, r := range routes {
+				printVerbose("  %s %s -> %s", r.Method, r.Path, r.Handler)
+			}
+		}
+
+		// Extract schemas (if mode allows)
+		if cfg.Generation.Mode == "full" || cfg.Generation.Mode == "schemas-only" {
+			extractedSchemas, err := plugin.ExtractSchemas(files)
+			if err != nil {
+				return fmt.Errorf("failed to extract schemas: %w", err)
+			}
+			schemas = extractedSchemas
+			printInfo("Found %d schemas", len(schemas))
+
+			for _, s := range schemas {
+				printVerbose("  %s", s.Title)
+			}
+		}
+	} else {
+		printInfo("No plugin available - generating empty specification")
+	}
 
 	// Create OpenAPI builder
 	builder := openapi.NewBuilder(cfg)
-
-	// Build empty spec (parsers will provide routes/schemas in future)
-	var routes []types.Route
-	var schemas []types.Schema
 
 	doc, err := builder.Build(routes, schemas)
 	if err != nil {
