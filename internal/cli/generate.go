@@ -5,11 +5,16 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/api2spec/api2spec/internal/config"
+	"github.com/api2spec/api2spec/internal/openapi"
+	"github.com/api2spec/api2spec/internal/scanner"
+	"github.com/api2spec/api2spec/pkg/types"
 )
 
 var (
@@ -102,9 +107,110 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		printInfo("Dry run mode - no files will be written")
 	}
 
-	// TODO: Implement actual generation logic
-	printInfo("Generate command not yet implemented")
-	printInfo("Would generate OpenAPI spec from paths: %s", strings.Join(paths, ", "))
+	// Create scanner with config
+	scannerCfg := scanner.Config{
+		IncludePatterns: cfg.Source.Include,
+		ExcludePatterns: cfg.Source.Exclude,
+	}
 
+	// Scan for source files
+	var files []scanner.SourceFile
+	for _, path := range paths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("failed to resolve path %s: %w", path, err)
+		}
+		scannerCfg.BasePath = absPath
+		s := scanner.New(scannerCfg)
+		pathFiles, err := s.Scan()
+		if err != nil {
+			return fmt.Errorf("failed to scan path %s: %w", path, err)
+		}
+		files = append(files, pathFiles...)
+	}
+
+	// Print discovered files in verbose mode
+	printVerbose("Discovered %d source files:", len(files))
+	for _, f := range files {
+		printVerbose("  [%s] %s", f.Language, f.Path)
+	}
+
+	if len(files) == 0 {
+		printInfo("No source files found matching patterns")
+		return nil
+	}
+
+	printInfo("Found %d source files to analyze", len(files))
+
+	// Group files by language for future parser dispatch
+	byLanguage := make(map[string][]scanner.SourceFile)
+	for _, f := range files {
+		byLanguage[f.Language] = append(byLanguage[f.Language], f)
+	}
+
+	for lang, langFiles := range byLanguage {
+		printVerbose("  %s: %d files", lang, len(langFiles))
+	}
+
+	// TODO: Implement actual parsing logic
+	// For now, we create an empty spec structure
+	// Future: parsers will extract routes and schemas from files
+
+	printInfo("Parsing source files... (parser not yet implemented)")
+	printInfo("Creating empty OpenAPI specification with config values")
+
+	// Create OpenAPI builder
+	builder := openapi.NewBuilder(cfg)
+
+	// Build empty spec (parsers will provide routes/schemas in future)
+	var routes []types.Route
+	var schemas []types.Schema
+
+	doc, err := builder.Build(routes, schemas)
+	if err != nil {
+		return fmt.Errorf("failed to build OpenAPI spec: %w", err)
+	}
+
+	// Handle merge if requested
+	if cfg.Generation.Merge {
+		if _, err := os.Stat(cfg.Output); err == nil {
+			printVerbose("Merging with existing spec: %s", cfg.Output)
+			existing, err := openapi.ReadFile(cfg.Output)
+			if err != nil {
+				return fmt.Errorf("failed to read existing spec for merge: %w", err)
+			}
+			doc, err = openapi.MergeDefault(existing, doc)
+			if err != nil {
+				return fmt.Errorf("failed to merge specs: %w", err)
+			}
+		} else {
+			printVerbose("No existing spec found at %s, creating new", cfg.Output)
+		}
+	}
+
+	// Write output
+	writer := openapi.NewWriter()
+
+	if generateDryRun {
+		// Print to stdout
+		var output string
+		if cfg.Format == "json" {
+			output, err = writer.ToJSON(doc)
+		} else {
+			output, err = writer.ToYAML(doc)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to serialize spec: %w", err)
+		}
+		fmt.Print(output)
+		return nil
+	}
+
+	// Write to file
+	if err := writer.WriteFile(doc, cfg.Output, cfg.Format); err != nil {
+		return fmt.Errorf("failed to write spec: %w", err)
+	}
+
+	printInfo("OpenAPI specification written to: %s", cfg.Output)
 	return nil
 }

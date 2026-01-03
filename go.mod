@@ -3,6 +3,7 @@ module github.com/api2spec/api2spec
 go 1.25.5
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.9.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
