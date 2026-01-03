@@ -14,10 +14,14 @@ import (
 	"github.com/api2spec/api2spec/internal/config"
 	"github.com/api2spec/api2spec/internal/openapi"
 	"github.com/api2spec/api2spec/internal/plugins"
-	_ "github.com/api2spec/api2spec/internal/plugins/chi"  // Register chi plugin
-	_ "github.com/api2spec/api2spec/internal/plugins/echo" // Register echo plugin
-	_ "github.com/api2spec/api2spec/internal/plugins/gin"  // Register gin plugin
-	_ "github.com/api2spec/api2spec/internal/plugins/hono" // Register hono plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/chi"     // Register chi plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/echo"    // Register echo plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/elysia"  // Register elysia plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/express" // Register express plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/fastify" // Register fastify plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/gin"     // Register gin plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/hono"    // Register hono plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/koa"     // Register koa plugin
 	"github.com/api2spec/api2spec/internal/scanner"
 	"github.com/api2spec/api2spec/pkg/types"
 )
