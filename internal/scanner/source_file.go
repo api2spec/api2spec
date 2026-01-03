@@ -48,6 +48,16 @@ var languageExtensions = map[string]string{
 	".exs":   "elixir",
 	".rb":    "ruby",
 	".gleam": "gleam",
+	".cpp":   "cpp",
+	".hpp":   "cpp",
+	".h":     "cpp",
+	".cc":    "cpp",
+	".cxx":   "cpp",
+	".scala": "scala",
+	".sc":    "scala",
+	".swift": "swift",
+	".hs":    "haskell",
+	".lhs":   "haskell",
 }
 
 // DetectLanguage detects the programming language from a file path.

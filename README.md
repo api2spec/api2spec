@@ -62,7 +62,7 @@ api2spec diff
 
 ## Supported Frameworks
 
-**29 frameworks across 11 languages** - with more being added regularly.
+**36 frameworks across 15 languages** - with more being added regularly.
 
 ### Go
 
@@ -123,6 +123,33 @@ api2spec diff
 | **Spring Boot** | `spring-boot` in pom.xml/build.gradle | DTOs, records |
 | **Micronaut** | `io.micronaut` in build.gradle/pom.xml | DTOs, data classes |
 | **Ktor** | `io.ktor` in build.gradle.kts | Data classes |
+
+### C++
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Drogon** | `drogon` in CMakeLists.txt | C++ structs |
+| **Oat++** | `oatpp` in CMakeLists.txt | DTO classes |
+| **Crow** | `crow` in CMakeLists.txt | Plain C++ |
+
+### Scala
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Play** | `com.typesafe.play` in build.sbt | Case classes |
+| **Tapir** | `sttp.tapir` in build.sbt | Case classes |
+
+### Swift
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Vapor** | `vapor` in Package.swift | Content structs |
+
+### Haskell
+
+| Framework | Detection | Schema Support |
+|-----------|-----------|----------------|
+| **Servant** | `servant` in package.yaml/*.cabal | Data types |
 
 ### Elixir
 
