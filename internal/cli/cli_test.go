@@ -149,7 +149,7 @@ func TestCheckCommand_Help(t *testing.T) {
 	output, err := executeCommand(rootCmd, "check", "--help")
 	require.NoError(t, err)
 
-	assert.Contains(t, output, "Check validates your route definitions")
+	assert.Contains(t, output, "Check validates that your OpenAPI specification matches your current code")
 	assert.Contains(t, output, "--strict")
 	assert.Contains(t, output, "--ignore")
 	assert.Contains(t, output, "--ci")

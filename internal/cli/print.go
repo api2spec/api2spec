@@ -8,6 +8,10 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/api2spec/api2spec/internal/config"
+	"github.com/api2spec/api2spec/internal/openapi"
+	"github.com/api2spec/api2spec/pkg/types"
 )
 
 var printCmd = &cobra.Command{
@@ -29,7 +33,21 @@ Example:
 }
 
 func runPrint(cmd *cobra.Command, args []string) error {
-	outputFormat := format
+	// Load config
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Apply command-line overrides
+	if format != "" {
+		cfg.Format = format
+	}
+	if framework != "" {
+		cfg.Framework = framework
+	}
+
+	outputFormat := cfg.Format
 	if outputFormat == "" {
 		outputFormat = "yaml"
 	}
@@ -37,20 +55,49 @@ func runPrint(cmd *cobra.Command, args []string) error {
 	printVerbose("Print configuration:")
 	printVerbose("  Format: %s", outputFormat)
 
+	var spec *types.OpenAPI
+
 	if len(args) > 0 {
 		// Print existing file
 		filePath := args[0]
-		data, err := os.ReadFile(filePath)
+		printVerbose("Reading spec from: %s", filePath)
+
+		// Check if file exists
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			return fmt.Errorf("file not found: %s", filePath)
+		}
+
+		spec, err = openapi.ReadFile(filePath)
 		if err != nil {
 			return fmt.Errorf("failed to read file %s: %w", filePath, err)
 		}
-		fmt.Print(string(data))
-		return nil
+	} else {
+		// Generate spec from code
+		printVerbose("Generating spec from source code...")
+
+		spec, err = generateSpecFromCode(cfg, cfg.Source.Paths)
+		if err != nil {
+			return fmt.Errorf("failed to generate spec: %w", err)
+		}
 	}
 
-	// TODO: Implement generation and print logic
-	printInfo("Print command not yet fully implemented")
-	printInfo("Would generate and print OpenAPI spec in %s format", outputFormat)
+	// Write to stdout
+	writer := openapi.NewWriter()
+
+	var output string
+	switch outputFormat {
+	case "json":
+		output, err = writer.ToJSON(spec)
+	default:
+		output, err = writer.ToYAML(spec)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to serialize spec: %w", err)
+	}
+
+	// Print to stdout (without using printInfo to avoid newline issues)
+	fmt.Print(output)
 
 	return nil
 }

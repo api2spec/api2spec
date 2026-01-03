@@ -13,6 +13,9 @@ import (
 	"regexp"
 	"strings"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"github.com/api2spec/api2spec/internal/parser"
 	"github.com/api2spec/api2spec/internal/plugins"
 	"github.com/api2spec/api2spec/internal/scanner"
@@ -485,8 +488,9 @@ func generateOperationID(method, path, handler string) string {
 	var sb strings.Builder
 	sb.WriteString(strings.ToLower(method))
 
+	titleCaser := cases.Title(language.English)
 	for _, word := range words {
-		word = strings.Title(strings.ToLower(word))
+		word = titleCaser.String(strings.ToLower(word))
 		sb.WriteString(word)
 	}
 
