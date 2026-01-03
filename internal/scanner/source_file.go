@@ -30,6 +30,8 @@ var languageExtensions = map[string]string{
 	".go":  "go",
 	".ts":  "typescript",
 	".tsx": "typescript",
+	".mts": "typescript",
+	".cts": "typescript",
 	".js":  "javascript",
 	".jsx": "javascript",
 	".mjs": "javascript",

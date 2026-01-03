@@ -152,7 +152,8 @@ func (e *GoSchemaExtractor) typeToSchema(field parser.StructField) *types.Schema
 }
 
 // primitiveOrRefSchema handles pointer types.
-func (e *GoSchemaExtractor) primitiveOrRefSchema(typeName string, field parser.StructField) *types.Schema {
+// TODO: Use field parameter to apply validation constraints from struct tags.
+func (e *GoSchemaExtractor) primitiveOrRefSchema(typeName string, _ parser.StructField) *types.Schema {
 	// Check for time.Time
 	if typeName == "time.Time" {
 		return &types.Schema{
