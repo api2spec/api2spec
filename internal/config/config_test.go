@@ -15,7 +15,7 @@ import (
 func TestDefault(t *testing.T) {
 	cfg := Default()
 
-	assert.Equal(t, "chi", cfg.Framework)
+	assert.Equal(t, "auto", cfg.Framework)
 	assert.Equal(t, "openapi.yaml", cfg.Output)
 	assert.Equal(t, "yaml", cfg.Format)
 	assert.Equal(t, "3.0.3", cfg.OpenAPI.Version)
@@ -41,7 +41,7 @@ func TestLoad_NoConfigFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should return default config
-	assert.Equal(t, "chi", cfg.Framework)
+	assert.Equal(t, "auto", cfg.Framework)
 	assert.Equal(t, "openapi.yaml", cfg.Output)
 }
 
@@ -352,5 +352,5 @@ func TestLoadFromPath_NoConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should return default config
-	assert.Equal(t, "chi", cfg.Framework)
+	assert.Equal(t, "auto", cfg.Framework)
 }

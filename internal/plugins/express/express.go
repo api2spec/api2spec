@@ -108,12 +108,18 @@ func (p *Plugin) Detect(projectRoot string) (bool, error) {
 func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error) {
 	var routes []types.Route
 
+	// First pass: build a map of file paths to their mount paths
+	fileMountPaths := p.buildFileMountMap(files)
+
 	for _, file := range files {
 		if file.Language != "typescript" && file.Language != "javascript" {
 			continue
 		}
 
-		fileRoutes, err := p.extractRoutesFromFile(file)
+		// Get the mount path for this file (if any)
+		mountPath := fileMountPaths[file.Path]
+
+		fileRoutes, err := p.extractRoutesFromFileWithMount(file, mountPath)
 		if err != nil {
 			// Log error but continue with other files
 			continue
@@ -125,16 +131,194 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 	return routes, nil
 }
 
-// routerInfo tracks information about an Express app or router variable.
-type routerInfo struct {
-	name       string
-	basePath   string
-	isRouter   bool
-	parentName string // For tracking nested routers
+// importInfo tracks an import statement.
+type importInfo struct {
+	localName  string // The local variable name (e.g., "teaRoutes")
+	sourcePath string // The relative source path (e.g., "./teas.js")
 }
 
-// extractRoutesFromFile extracts routes from a single TypeScript/JavaScript file.
-func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) ([]types.Route, error) {
+// buildFileMountMap builds a map from absolute file paths to their mount paths.
+// It does this by:
+// 1. Finding all import statements to track which files are imported as which variables
+// 2. Finding all router.use('/path', variable) calls to track mount paths
+// 3. Resolving the import paths to absolute paths
+func (p *Plugin) buildFileMountMap(files []scanner.SourceFile) map[string]string {
+	// Map from absolute file path to mount path
+	fileMountPaths := make(map[string]string)
+
+	// For each file, find imports and mounts
+	for _, file := range files {
+		if file.Language != "typescript" && file.Language != "javascript" {
+			continue
+		}
+
+		pf, err := p.tsParser.Parse(file.Path, file.Content)
+		if err != nil {
+			continue
+		}
+
+		// Find all imports in this file
+		imports := p.findImports(pf.RootNode, file.Content)
+
+		// Find router variables
+		routers := p.findRouterVariables(pf.RootNode, file.Content)
+
+		// Find router.use() mounts
+		mounts := p.findRouterUseMounts(pf.RootNode, file.Content, routers)
+
+		// For each import that's mounted, resolve the file path
+		fileDir := filepath.Dir(file.Path)
+		for _, imp := range imports {
+			if mountPath, ok := mounts[imp.localName]; ok {
+				// Resolve the import path to an absolute path
+				resolvedPath := p.resolveImportPath(fileDir, imp.sourcePath)
+				if resolvedPath != "" {
+					fileMountPaths[resolvedPath] = mountPath
+				}
+			}
+		}
+
+		pf.Close()
+	}
+
+	return fileMountPaths
+}
+
+// findImports finds all import statements in a file.
+func (p *Plugin) findImports(rootNode *sitter.Node, content []byte) []importInfo {
+	var imports []importInfo
+
+	p.walkNodes(rootNode, func(node *sitter.Node) bool {
+		if node.Type() == "import_statement" {
+			imp := p.parseImportStatement(node, content)
+			if imp.localName != "" && imp.sourcePath != "" {
+				imports = append(imports, imp)
+			}
+		}
+		return true
+	})
+
+	return imports
+}
+
+// parseImportStatement parses an import statement to extract local name and source.
+func (p *Plugin) parseImportStatement(node *sitter.Node, content []byte) importInfo {
+	var info importInfo
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+
+		// Get the source path from the string literal
+		if child.Type() == "string" {
+			info.sourcePath = strings.Trim(child.Content(content), `"'`)
+		}
+
+		// Get the default import name
+		if child.Type() == "import_clause" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				clauseChild := child.Child(j)
+				if clauseChild.Type() == "identifier" {
+					info.localName = clauseChild.Content(content)
+				}
+			}
+		}
+	}
+
+	return info
+}
+
+// findRouterUseMounts finds router.use('/path', routerVar) calls and returns a map of variable names to mount paths.
+func (p *Plugin) findRouterUseMounts(rootNode *sitter.Node, content []byte, routers map[string]*routerInfo) map[string]string {
+	mounts := make(map[string]string)
+
+	calls := p.tsParser.FindCallExpressions(rootNode, content)
+
+	for _, call := range calls {
+		callee := call.Child(0)
+		if callee == nil || callee.Type() != "member_expression" {
+			continue
+		}
+
+		object, method := p.tsParser.GetMemberExpressionParts(callee, content)
+		if method != "use" {
+			continue
+		}
+
+		// Check if the object is an Express app or router
+		if _, ok := routers[object]; !ok {
+			if object != "app" && object != "router" {
+				continue
+			}
+		}
+
+		args := p.tsParser.GetCallArguments(call, content)
+		if len(args) < 2 {
+			continue
+		}
+
+		// First arg should be the path prefix
+		pathArg := args[0]
+		path := ""
+		if pathArg.Type() == "string" || pathArg.Type() == "template_string" {
+			path, _ = p.tsParser.ExtractStringLiteral(pathArg, content)
+		}
+
+		if path == "" {
+			continue
+		}
+
+		// Second arg should be the router variable
+		routerArg := args[1]
+		if routerArg.Type() == "identifier" {
+			routerName := routerArg.Content(content)
+			mounts[routerName] = path
+		}
+	}
+
+	return mounts
+}
+
+// resolveImportPath resolves a relative import path to an absolute file path.
+func (p *Plugin) resolveImportPath(fromDir, importPath string) string {
+	// Only handle relative imports
+	if !strings.HasPrefix(importPath, "./") && !strings.HasPrefix(importPath, "../") {
+		return ""
+	}
+
+	// Remove .js extension if present (TypeScript compiles to .js but source is .ts)
+	importPath = strings.TrimSuffix(importPath, ".js")
+
+	// Try common extensions
+	extensions := []string{".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"}
+
+	basePath := filepath.Join(fromDir, importPath)
+
+	for _, ext := range extensions {
+		fullPath := basePath + ext
+		if _, err := os.Stat(fullPath); err == nil {
+			absPath, err := filepath.Abs(fullPath)
+			if err == nil {
+				return absPath
+			}
+		}
+	}
+
+	// Try index files
+	for _, ext := range extensions {
+		indexPath := filepath.Join(basePath, "index"+ext)
+		if _, err := os.Stat(indexPath); err == nil {
+			absPath, err := filepath.Abs(indexPath)
+			if err == nil {
+				return absPath
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractRoutesFromFileWithMount extracts routes from a file with an optional mount path prefix.
+func (p *Plugin) extractRoutesFromFileWithMount(file scanner.SourceFile, mountPath string) ([]types.Route, error) {
 	pf, err := p.tsParser.Parse(file.Path, file.Content)
 	if err != nil {
 		return nil, err
@@ -157,14 +341,14 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) ([]types.Route, 
 	// Track router/app variables and their base paths
 	routers := p.findRouterVariables(pf.RootNode, file.Content)
 
-	// Track router mounting (app.use('/prefix', router))
+	// Track router mounting within this file (app.use('/prefix', router))
 	routerMounts := p.findRouterMounts(pf.RootNode, file.Content, routers)
 
 	// Find all call expressions
 	calls := p.tsParser.FindCallExpressions(pf.RootNode, file.Content)
 
 	for _, call := range calls {
-		extractedRoutes := p.extractRoutesFromCall(call, file.Content, routers, routerMounts, zodSchemas)
+		extractedRoutes := p.extractRoutesFromCallWithMount(call, file.Content, routers, routerMounts, zodSchemas, mountPath)
 		for i := range extractedRoutes {
 			extractedRoutes[i].SourceFile = file.Path
 			routes = append(routes, extractedRoutes[i])
@@ -172,6 +356,189 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) ([]types.Route, 
 	}
 
 	return routes, nil
+}
+
+// extractRoutesFromCallWithMount extracts routes from a call expression with mount path support.
+func (p *Plugin) extractRoutesFromCallWithMount(
+	node *sitter.Node,
+	content []byte,
+	routers map[string]*routerInfo,
+	routerMounts map[string]string,
+	zodSchemas map[string]*sitter.Node,
+	fileMountPath string,
+) []types.Route {
+	// Get the callee (function being called)
+	callee := node.Child(0)
+	if callee == nil {
+		return nil
+	}
+
+	// Check for route chaining: app.route('/path').get().post()
+	if chainedRoutes := p.extractRouteChainWithMount(node, content, routers, routerMounts, zodSchemas, fileMountPath); len(chainedRoutes) > 0 {
+		return chainedRoutes
+	}
+
+	// Check if this is a method call (member_expression)
+	if callee.Type() != "member_expression" {
+		return nil
+	}
+
+	// Get object and method
+	object, method := p.tsParser.GetMemberExpressionParts(callee, content)
+	if object == "" || method == "" {
+		return nil
+	}
+
+	// Check if method is an HTTP method
+	httpMethod, isHTTPMethod := httpMethods[strings.ToLower(method)]
+	if !isHTTPMethod {
+		return nil
+	}
+
+	// Check if object is a known router or app
+	inFilePrefix := ""
+	if mount, ok := routerMounts[object]; ok {
+		inFilePrefix = mount
+	}
+
+	// Get arguments
+	args := p.tsParser.GetCallArguments(node, content)
+	if len(args) == 0 {
+		return nil
+	}
+
+	// First argument should be the path
+	pathArg := args[0]
+	path := ""
+	if pathArg.Type() == "string" || pathArg.Type() == "template_string" {
+		path, _ = p.tsParser.ExtractStringLiteral(pathArg, content)
+	}
+
+	if path == "" {
+		return nil
+	}
+
+	// Combine: fileMountPath + inFilePrefix + path
+	fullPath := combinePaths(fileMountPath, combinePaths(inFilePrefix, path))
+
+	// Convert Express path parameters (:param) to OpenAPI format ({param})
+	fullPath = convertPathParams(fullPath)
+
+	// Extract path parameters
+	params := extractPathParams(fullPath)
+
+	// Look for validation middleware to determine request body schema
+	var requestBody *types.RequestBody
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg.Type() == "call_expression" {
+			schemaRef := p.extractValidatorSchema(arg, content, zodSchemas)
+			if schemaRef != nil {
+				requestBody = &types.RequestBody{
+					Required: true,
+					Content: map[string]types.MediaType{
+						"application/json": {
+							Schema: schemaRef,
+						},
+					},
+				}
+				break
+			}
+		}
+	}
+
+	// Generate operation ID
+	operationID := generateOperationID(httpMethod, fullPath, "")
+
+	// Infer tags from path
+	tags := inferTags(fullPath)
+
+	route := types.Route{
+		Method:      httpMethod,
+		Path:        fullPath,
+		OperationID: operationID,
+		Tags:        tags,
+		Parameters:  params,
+		RequestBody: requestBody,
+		SourceLine:  int(node.StartPoint().Row) + 1,
+	}
+
+	return []types.Route{route}
+}
+
+// extractRouteChainWithMount handles app.route('/path').get().post() patterns with mount path support.
+func (p *Plugin) extractRouteChainWithMount(
+	node *sitter.Node,
+	content []byte,
+	_ map[string]*routerInfo,
+	routerMounts map[string]string,
+	_ map[string]*sitter.Node,
+	fileMountPath string,
+) []types.Route {
+	// Build the chain of method calls
+	chain := p.buildMethodChain(node, content)
+	if len(chain) == 0 {
+		return nil
+	}
+
+	// Find the base route() call
+	var basePath string
+	var baseRouterName string
+	var routeCallFound bool
+
+	for i := len(chain) - 1; i >= 0; i-- {
+		item := chain[i]
+		if item.method == "route" && len(item.args) > 0 {
+			basePath, _ = p.tsParser.ExtractStringLiteral(item.args[0], content)
+			baseRouterName = item.object
+			routeCallFound = true
+			break
+		}
+	}
+
+	if !routeCallFound || basePath == "" {
+		return nil
+	}
+
+	// Apply in-file prefix if router is mounted within this file
+	inFilePrefix := ""
+	if mount, ok := routerMounts[baseRouterName]; ok {
+		inFilePrefix = mount
+	}
+
+	// Combine: fileMountPath + inFilePrefix + basePath
+	fullPath := combinePaths(fileMountPath, combinePaths(inFilePrefix, basePath))
+	fullPath = convertPathParams(fullPath)
+	params := extractPathParams(fullPath)
+	tags := inferTags(fullPath)
+
+	var routes []types.Route
+
+	// Extract HTTP method calls from the chain
+	for _, item := range chain {
+		if httpMethod, isHTTP := httpMethods[strings.ToLower(item.method)]; isHTTP {
+			operationID := generateOperationID(httpMethod, fullPath, "")
+			route := types.Route{
+				Method:      httpMethod,
+				Path:        fullPath,
+				OperationID: operationID,
+				Tags:        tags,
+				Parameters:  params,
+				SourceLine:  int(node.StartPoint().Row) + 1,
+			}
+			routes = append(routes, route)
+		}
+	}
+
+	return routes
+}
+
+// routerInfo tracks information about an Express app or router variable.
+type routerInfo struct {
+	name       string
+	basePath   string
+	isRouter   bool
+	parentName string // For tracking nested routers
 }
 
 // hasExpressImport checks if the file imports or requires 'express'.
@@ -320,180 +687,6 @@ func (p *Plugin) findRouterMounts(rootNode *sitter.Node, content []byte, routers
 	}
 
 	return mounts
-}
-
-// extractRoutesFromCall extracts routes from a call expression.
-// Returns multiple routes for route chaining patterns.
-func (p *Plugin) extractRoutesFromCall(
-	node *sitter.Node,
-	content []byte,
-	routers map[string]*routerInfo,
-	routerMounts map[string]string,
-	zodSchemas map[string]*sitter.Node,
-) []types.Route {
-	// Get the callee (function being called)
-	callee := node.Child(0)
-	if callee == nil {
-		return nil
-	}
-
-	// Check for route chaining: app.route('/path').get().post()
-	if chainedRoutes := p.extractRouteChain(node, content, routers, routerMounts, zodSchemas); len(chainedRoutes) > 0 {
-		return chainedRoutes
-	}
-
-	// Check if this is a method call (member_expression)
-	if callee.Type() != "member_expression" {
-		return nil
-	}
-
-	// Get object and method
-	object, method := p.tsParser.GetMemberExpressionParts(callee, content)
-	if object == "" || method == "" {
-		return nil
-	}
-
-	// Check if method is an HTTP method
-	httpMethod, isHTTPMethod := httpMethods[strings.ToLower(method)]
-	if !isHTTPMethod {
-		return nil
-	}
-
-	// Check if object is a known router or app
-	prefix := ""
-	if mount, ok := routerMounts[object]; ok {
-		prefix = mount
-	}
-
-	// Get arguments
-	args := p.tsParser.GetCallArguments(node, content)
-	if len(args) == 0 {
-		return nil
-	}
-
-	// First argument should be the path
-	pathArg := args[0]
-	path := ""
-	if pathArg.Type() == "string" || pathArg.Type() == "template_string" {
-		path, _ = p.tsParser.ExtractStringLiteral(pathArg, content)
-	}
-
-	if path == "" {
-		return nil
-	}
-
-	// Combine prefix and path
-	fullPath := combinePaths(prefix, path)
-
-	// Convert Express path parameters (:param) to OpenAPI format ({param})
-	fullPath = convertPathParams(fullPath)
-
-	// Extract path parameters
-	params := extractPathParams(fullPath)
-
-	// Look for validation middleware to determine request body schema
-	var requestBody *types.RequestBody
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
-		if arg.Type() == "call_expression" {
-			schemaRef := p.extractValidatorSchema(arg, content, zodSchemas)
-			if schemaRef != nil {
-				requestBody = &types.RequestBody{
-					Required: true,
-					Content: map[string]types.MediaType{
-						"application/json": {
-							Schema: schemaRef,
-						},
-					},
-				}
-				break
-			}
-		}
-	}
-
-	// Generate operation ID
-	operationID := generateOperationID(httpMethod, fullPath, "")
-
-	// Infer tags from path
-	tags := inferTags(fullPath)
-
-	route := types.Route{
-		Method:      httpMethod,
-		Path:        fullPath,
-		OperationID: operationID,
-		Tags:        tags,
-		Parameters:  params,
-		RequestBody: requestBody,
-		SourceLine:  int(node.StartPoint().Row) + 1,
-	}
-
-	return []types.Route{route}
-}
-
-// extractRouteChain handles app.route('/path').get().post() patterns.
-// TODO: Use routers for prefix tracking in nested routes.
-func (p *Plugin) extractRouteChain(
-	node *sitter.Node,
-	content []byte,
-	_ map[string]*routerInfo,
-	routerMounts map[string]string,
-	_ map[string]*sitter.Node,
-) []types.Route {
-	// Build the chain of method calls
-	chain := p.buildMethodChain(node, content)
-	if len(chain) == 0 {
-		return nil
-	}
-
-	// Find the base route() call
-	var basePath string
-	var baseRouterName string
-	var routeCallFound bool
-
-	for i := len(chain) - 1; i >= 0; i-- {
-		item := chain[i]
-		if item.method == "route" && len(item.args) > 0 {
-			basePath, _ = p.tsParser.ExtractStringLiteral(item.args[0], content)
-			baseRouterName = item.object
-			routeCallFound = true
-			break
-		}
-	}
-
-	if !routeCallFound || basePath == "" {
-		return nil
-	}
-
-	// Apply prefix if router is mounted
-	prefix := ""
-	if mount, ok := routerMounts[baseRouterName]; ok {
-		prefix = mount
-	}
-
-	fullPath := combinePaths(prefix, basePath)
-	fullPath = convertPathParams(fullPath)
-	params := extractPathParams(fullPath)
-	tags := inferTags(fullPath)
-
-	var routes []types.Route
-
-	// Extract HTTP method calls from the chain
-	for _, item := range chain {
-		if httpMethod, isHTTP := httpMethods[strings.ToLower(item.method)]; isHTTP {
-			operationID := generateOperationID(httpMethod, fullPath, "")
-			route := types.Route{
-				Method:      httpMethod,
-				Path:        fullPath,
-				OperationID: operationID,
-				Tags:        tags,
-				Parameters:  params,
-				SourceLine:  int(node.StartPoint().Row) + 1,
-			}
-			routes = append(routes, route)
-		}
-	}
-
-	return routes
 }
 
 // methodCall represents a method call in a chain.

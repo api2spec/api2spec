@@ -50,7 +50,7 @@ Example:
 }
 
 func init() {
-	initCmd.Flags().StringVar(&initFramework, "framework", "", "web framework to use (chi, gin, echo, fiber, gorilla, stdlib). If not specified, auto-detects from go.mod")
+	initCmd.Flags().StringVar(&initFramework, "framework", "", "web framework to use. If not specified, auto-detects from project files")
 	initCmd.Flags().BoolVar(&initForce, "force", false, "overwrite existing config file")
 	initCmd.Flags().BoolVarP(&initInteractive, "interactive", "i", false, "interactive mode with prompts")
 	initCmd.Flags().StringVar(&initTitle, "title", "", "API title for OpenAPI info")
@@ -93,18 +93,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 			printInfo("Detected framework: %s", fw)
 		}
 	} else {
-		// Validate framework
-		validFrameworks := map[string]bool{
-			"chi":     true,
-			"gin":     true,
-			"echo":    true,
-			"fiber":   true,
-			"gorilla": true,
-			"stdlib":  true,
-			"auto":    true,
-		}
-		if !validFrameworks[fw] {
-			return fmt.Errorf("unsupported framework %q, must be one of: chi, gin, echo, fiber, gorilla, stdlib, auto", fw)
+		// Validate framework using plugins registry
+		if fw != "auto" && plugins.Get(fw) == nil {
+			return fmt.Errorf("unsupported framework %q, must be one of: %s, auto", fw, strings.Join(plugins.List(), ", "))
 		}
 	}
 	cfg.Framework = fw

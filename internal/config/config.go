@@ -195,12 +195,43 @@ var configFileNames = []string{
 
 // supportedFrameworks is the list of supported frameworks.
 var supportedFrameworks = []string{
+	// Special
+	"auto",
+	// Go
 	"chi",
 	"gin",
 	"echo",
 	"fiber",
 	"gorilla",
 	"stdlib",
+	// JavaScript/TypeScript
+	"express",
+	"fastify",
+	"koa",
+	"hono",
+	"elysia",
+	"nestjs",
+	// Python
+	"flask",
+	"fastapi",
+	// Rust
+	"axum",
+	"actix",
+	"rocket",
+	// JVM
+	"spring",
+	"ktor",
+	// Ruby
+	"rails",
+	"sinatra",
+	// PHP
+	"laravel",
+	// Elixir
+	"phoenix",
+	// .NET
+	"aspnet",
+	// Gleam
+	"gleam",
 }
 
 // supportedFormats is the list of supported output formats.
@@ -254,7 +285,7 @@ func (e ValidationErrors) Error() string {
 // Default returns a Config with default values.
 func Default() *Config {
 	return &Config{
-		Framework: "chi",
+		Framework: "auto",
 		Output:    "openapi.yaml",
 		Format:    "yaml",
 		OpenAPI: OpenAPIConfig{
@@ -266,7 +297,7 @@ func Default() *Config {
 		},
 		Source: SourceConfig{
 			Paths:   []string{"."},
-			Include: []string{"**/*.go"},
+			Include: []string{"**/*.go", "**/*.ts", "**/*.js", "**/*.py", "**/*.rs", "**/*.java", "**/*.kt", "**/*.rb", "**/*.php", "**/*.ex", "**/*.exs", "**/*.cs", "**/*.gleam"},
 			Exclude: []string{
 				"vendor/**",
 				"**/*_test.go",
@@ -355,14 +386,14 @@ func LoadFromPath(dir string) (*Config, error) {
 
 // setDefaults sets the default values for viper.
 func setDefaults(v *viper.Viper) {
-	v.SetDefault("framework", "chi")
+	v.SetDefault("framework", "auto")
 	v.SetDefault("output", "openapi.yaml")
 	v.SetDefault("format", "yaml")
 	v.SetDefault("openapi.version", "3.0.3")
 	v.SetDefault("openapi.info.title", "API")
 	v.SetDefault("openapi.info.version", "1.0.0")
 	v.SetDefault("source.paths", []string{"."})
-	v.SetDefault("source.include", []string{"**/*.go"})
+	v.SetDefault("source.include", []string{"**/*.go", "**/*.ts", "**/*.js", "**/*.py", "**/*.rs", "**/*.java", "**/*.kt", "**/*.rb", "**/*.php", "**/*.ex", "**/*.exs", "**/*.cs", "**/*.gleam"})
 	v.SetDefault("source.exclude", []string{
 		"vendor/**",
 		"**/*_test.go",
