@@ -303,10 +303,12 @@ func (p *Plugin) parseRouteDecorator(dec parser.PythonDecorator, fn parser.Pytho
 	var path string
 	var methods []string
 
+	pathProvided := false
 	if methodName == "route" {
-		// @app.route('/path', methods=['GET', 'POST'])
+		// @app.route('/path', methods=['GET', 'POST']) or @bp.route('', methods=['GET'])
 		if len(dec.Arguments) > 0 {
 			path = dec.Arguments[0]
+			pathProvided = true
 		}
 		// Check for methods keyword argument
 		if methodsStr, ok := dec.KeywordArguments["methods"]; ok {
@@ -319,13 +321,15 @@ func (p *Plugin) parseRouteDecorator(dec parser.PythonDecorator, fn parser.Pytho
 		// @app.get('/path'), @app.post('/path'), etc.
 		if len(dec.Arguments) > 0 {
 			path = dec.Arguments[0]
+			pathProvided = true
 		}
 		methods = []string{httpMethod}
 	} else {
 		return nil
 	}
 
-	if path == "" {
+	// Path must be explicitly provided (even if empty string for blueprint root)
+	if !pathProvided {
 		return nil
 	}
 
@@ -586,11 +590,19 @@ func flaskTypeToOpenAPI(flaskType string) string {
 // combinePaths combines a prefix and path, handling slashes correctly.
 func combinePaths(prefix, path string) string {
 	if prefix == "" {
+		if path == "" {
+			return "/"
+		}
 		return path
 	}
 
 	// Remove trailing slash from prefix
 	prefix = strings.TrimSuffix(prefix, "/")
+
+	// If path is empty, just return the prefix
+	if path == "" {
+		return prefix
+	}
 
 	// Ensure path starts with slash
 	if !strings.HasPrefix(path, "/") {

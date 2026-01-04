@@ -125,7 +125,27 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 		routes = append(routes, fileRoutes...)
 	}
 
+	// Deduplicate routes (same method + path = same route)
+	routes = deduplicateRoutes(routes)
+
 	return routes, nil
+}
+
+// deduplicateRoutes removes duplicate routes based on method + path.
+// When duplicates exist, keeps the first one (which typically has the most context).
+func deduplicateRoutes(routes []types.Route) []types.Route {
+	seen := make(map[string]bool)
+	var result []types.Route
+
+	for _, route := range routes {
+		key := route.Method + " " + route.Path
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, route)
+		}
+	}
+
+	return result
 }
 
 // extractRoutesFromFile extracts routes from a single Rust file.
