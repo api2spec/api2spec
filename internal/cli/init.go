@@ -81,9 +81,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fw = framework
 	}
 
+	var detectedPlugin plugins.FrameworkPlugin
 	if fw == "" {
 		printVerbose("Auto-detecting framework...")
-		detectedPlugin, err := plugins.Detect(projectRoot)
+		detectedPlugin, err = plugins.Detect(projectRoot)
 		if err != nil {
 			printVerbose("Framework detection failed: %v", err)
 			printInfo("No framework auto-detected. Using 'auto' mode.")
@@ -100,7 +101,26 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 	cfg.Framework = fw
 
-	// Detect project info from go.mod
+	// Set framework-specific source include patterns
+	if fw != "" && fw != "auto" {
+		plugin := detectedPlugin
+		if plugin == nil {
+			plugin = plugins.Get(fw)
+		}
+		if plugin != nil {
+			extensions := plugin.Extensions()
+			if len(extensions) > 0 {
+				patterns := make([]string, 0, len(extensions))
+				for _, ext := range extensions {
+					// Convert ".ts" to "**/*.ts"
+					patterns = append(patterns, "**/*"+ext)
+				}
+				cfg.Source.Include = patterns
+			}
+		}
+	}
+
+	// Detect project info from go.mod or package.json
 	projectInfo := detectProjectInfo(projectRoot)
 
 	// Set API info from detection or flags
