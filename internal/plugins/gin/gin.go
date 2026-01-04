@@ -136,7 +136,27 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 		routes = append(routes, fileRoutes...)
 	}
 
+	// Deduplicate routes (same method + path = same route)
+	routes = deduplicateRoutes(routes)
+
 	return routes, nil
+}
+
+// deduplicateRoutes removes duplicate routes based on method + path.
+// When duplicates exist, keeps the first one (which typically has the most context).
+func deduplicateRoutes(routes []types.Route) []types.Route {
+	seen := make(map[string]bool)
+	var result []types.Route
+
+	for _, route := range routes {
+		key := route.Method + " " + route.Path
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, route)
+		}
+	}
+
+	return result
 }
 
 // extractRoutesFromFile extracts routes from a single Go file.
@@ -185,14 +205,23 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) ([]types.Route, 
 
 // extractionContext tracks context during route extraction.
 type extractionContext struct {
-	file        *parser.ParsedFile
-	parser      *parser.GoParser
-	prefixStack []string
+	file         *parser.ParsedFile
+	parser       *parser.GoParser
+	prefixStack  []string
+	groupPrefixes map[string]string // Maps variable names to their group prefixes
 }
 
 // currentPrefix returns the current route prefix.
 func (ctx *extractionContext) currentPrefix() string {
 	return strings.Join(ctx.prefixStack, "")
+}
+
+// getPrefixForVar returns the prefix for a variable name (if it's a route group).
+func (ctx *extractionContext) getPrefixForVar(varName string) string {
+	if ctx.groupPrefixes != nil {
+		return ctx.groupPrefixes[varName]
+	}
+	return ""
 }
 
 // extractRoutesFromFunc extracts routes from a function body.
@@ -203,7 +232,11 @@ func (p *Plugin) extractRoutesFromFunc(funcDecl *ast.FuncDecl, ctx *extractionCo
 		return routes
 	}
 
-	// Walk the function body looking for method calls
+	// First pass: find all group assignments (e.g., teapots := r.Group("/teapots"))
+	ctx.groupPrefixes = make(map[string]string)
+	p.findGroupAssignments(funcDecl.Body, ctx)
+
+	// Second pass: extract routes
 	ast.Inspect(funcDecl.Body, func(n ast.Node) bool {
 		callExpr, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -217,7 +250,7 @@ func (p *Plugin) extractRoutesFromFunc(funcDecl *ast.FuncDecl, ctx *extractionCo
 
 		methodName := selExpr.Sel.Name
 
-		// Check for Group() calls - e.g., r.Group("/api")
+		// Check for Group() calls with chained methods - e.g., r.Group("/api").GET(...)
 		if methodName == "Group" {
 			nestedRoutes := p.handleRouteGroup(callExpr, ctx)
 			routes = append(routes, nestedRoutes...)
@@ -245,6 +278,38 @@ func (p *Plugin) extractRoutesFromFunc(funcDecl *ast.FuncDecl, ctx *extractionCo
 	})
 
 	return routes
+}
+
+// findGroupAssignments finds all route group variable assignments in a function body.
+// e.g., teapots := r.Group("/teapots")
+func (p *Plugin) findGroupAssignments(body *ast.BlockStmt, ctx *extractionContext) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		// Handle short variable declarations: teapots := r.Group("/teapots")
+		if assignStmt, ok := n.(*ast.AssignStmt); ok {
+			for i, rhs := range assignStmt.Rhs {
+				if callExpr, ok := rhs.(*ast.CallExpr); ok {
+					if selExpr, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+						if selExpr.Sel.Name == "Group" && len(callExpr.Args) >= 1 {
+							if prefix, ok := parser.ExtractStringLiteral(callExpr.Args[0]); ok {
+								// Get the variable name
+								if i < len(assignStmt.Lhs) {
+									if ident, ok := assignStmt.Lhs[i].(*ast.Ident); ok {
+										// Check if receiver is also a group variable (nested groups)
+										receiverPrefix := ""
+										if recvIdent, ok := selExpr.X.(*ast.Ident); ok {
+											receiverPrefix = ctx.groupPrefixes[recvIdent.Name]
+										}
+										ctx.groupPrefixes[ident.Name] = receiverPrefix + prefix
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
 }
 
 // handleRouteGroup handles r.Group("/prefix") calls and extracts nested routes.
@@ -327,7 +392,7 @@ func findParentCall(file *ast.File, target *ast.CallExpr) *ast.CallExpr {
 }
 
 // extractRouteFromCall extracts a Route from an HTTP method call.
-// e.g., r.GET("/users/:id", handler)
+// e.g., r.GET("/users/:id", handler) or teapots.GET("/:id", handler)
 func (p *Plugin) extractRouteFromCall(callExpr *ast.CallExpr, method string, ctx *extractionContext) *types.Route {
 	if len(callExpr.Args) < 1 {
 		return nil
@@ -339,8 +404,16 @@ func (p *Plugin) extractRouteFromCall(callExpr *ast.CallExpr, method string, ctx
 		return nil
 	}
 
-	// Combine with prefix
-	fullPath := ctx.currentPrefix() + path
+	// Get prefix from the receiver variable (if it's a route group)
+	var groupPrefix string
+	if selExpr, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := selExpr.X.(*ast.Ident); ok {
+			groupPrefix = ctx.getPrefixForVar(ident.Name)
+		}
+	}
+
+	// Combine with prefix (group prefix + stack prefix + path)
+	fullPath := groupPrefix + ctx.currentPrefix() + path
 
 	// Normalize path
 	fullPath = normalizePath(fullPath)
@@ -400,8 +473,16 @@ func (p *Plugin) extractRouteFromHandle(callExpr *ast.CallExpr, ctx *extractionC
 		return nil
 	}
 
-	// Combine with prefix
-	fullPath := ctx.currentPrefix() + path
+	// Get prefix from the receiver variable (if it's a route group)
+	var groupPrefix string
+	if selExpr, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+		if ident, ok := selExpr.X.(*ast.Ident); ok {
+			groupPrefix = ctx.getPrefixForVar(ident.Name)
+		}
+	}
+
+	// Combine with prefix (group prefix + stack prefix + path)
+	fullPath := groupPrefix + ctx.currentPrefix() + path
 
 	// Normalize path
 	fullPath = normalizePath(fullPath)
@@ -482,11 +563,48 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 
 		structs := p.goParser.ExtractStructs(pf)
 		for _, def := range structs {
+			// Skip implementation structs that aren't API schemas
+			if isImplementationStruct(def.Name) {
+				continue
+			}
 			p.schemaExtractor.ExtractFromStruct(def)
 		}
 	}
 
 	return p.schemaExtractor.Registry().ToSlice(), nil
+}
+
+// implementationSuffixes are suffixes that indicate a struct is an implementation detail, not an API schema.
+var implementationSuffixes = []string{
+	"Handler",
+	"Store",
+	"Service",
+	"Repository",
+	"Controller",
+	"Middleware",
+	"Server",
+	"Client",
+	"Config",
+	"Options",
+	"Manager",
+	"Provider",
+	"Factory",
+	"Builder",
+	"Pool",
+	"Cache",
+	"Worker",
+	"Router",
+	"Engine",
+}
+
+// isImplementationStruct checks if a struct name indicates it's an implementation detail.
+func isImplementationStruct(name string) bool {
+	for _, suffix := range implementationSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Helper Functions ---
