@@ -283,11 +283,160 @@ func inferTags(path string) []string {
 	return []string{tagPart}
 }
 
-// ExtractSchemas extracts schema definitions from Laravel form requests and resources.
-func (p *Plugin) ExtractSchemas(_ []scanner.SourceFile) ([]types.Schema, error) {
-	// Laravel doesn't have a standard schema definition pattern
-	// Form Requests and API Resources could be parsed, but that's complex
-	return []types.Schema{}, nil
+// ExtractSchemas extracts schema definitions from PHP classes (models, DTOs, etc).
+func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
+	var schemas []types.Schema
+
+	for _, file := range files {
+		if file.Language != "php" {
+			continue
+		}
+
+		pf := p.phpParser.Parse(file.Path, file.Content)
+
+		for _, class := range pf.Classes {
+			// Skip classes that look like controllers/services/etc
+			if isImplementationClass(class.Name) {
+				continue
+			}
+
+			schema := p.classToSchema(class)
+			if schema != nil && len(schema.Properties) > 0 {
+				schemas = append(schemas, *schema)
+			}
+		}
+	}
+
+	return schemas, nil
+}
+
+// classToSchema converts a PHP class to an OpenAPI schema.
+func (p *Plugin) classToSchema(class parser.PHPClass) *types.Schema {
+	schema := &types.Schema{
+		Title:      class.Name,
+		Type:       "object",
+		Properties: make(map[string]*types.Schema),
+		Required:   []string{},
+	}
+
+	// Handle Eloquent models via $fillable and $casts
+	if class.IsEloquentModel {
+		for _, field := range class.Fillable {
+			propSchema := &types.Schema{Type: "string"} // Default type
+
+			// Check if there's a cast that specifies the type
+			if castType, ok := class.Casts[field]; ok {
+				openAPIType, format := castTypeToOpenAPI(castType)
+				propSchema.Type = openAPIType
+				if format != "" {
+					propSchema.Format = format
+				}
+			}
+
+			schema.Properties[field] = propSchema
+		}
+
+		// Also add casted fields that aren't in fillable (like timestamps)
+		for field, castType := range class.Casts {
+			if _, exists := schema.Properties[field]; !exists {
+				openAPIType, format := castTypeToOpenAPI(castType)
+				propSchema := &types.Schema{Type: openAPIType}
+				if format != "" {
+					propSchema.Format = format
+				}
+				schema.Properties[field] = propSchema
+			}
+		}
+	}
+
+	// Handle plain PHP classes with properties (including constructor promoted)
+	for _, prop := range class.Properties {
+		// Only include public properties
+		if prop.Visibility != "public" {
+			continue
+		}
+
+		openAPIType, format := parser.PHPTypeToOpenAPI(prop.Type)
+		propSchema := &types.Schema{
+			Type: openAPIType,
+		}
+		if format != "" {
+			propSchema.Format = format
+		}
+		if prop.IsNullable {
+			propSchema.Nullable = true
+		}
+
+		schema.Properties[prop.Name] = propSchema
+
+		if !prop.IsNullable {
+			schema.Required = append(schema.Required, prop.Name)
+		}
+	}
+
+	return schema
+}
+
+// castTypeToOpenAPI converts a Laravel cast type to OpenAPI type.
+func castTypeToOpenAPI(castType string) (string, string) {
+	castType = strings.ToLower(castType)
+
+	switch castType {
+	case "string", "encrypted":
+		return "string", ""
+	case "int", "integer":
+		return "integer", ""
+	case "real", "float", "double", "decimal":
+		return "number", ""
+	case "bool", "boolean":
+		return "boolean", ""
+	case "array", "collection":
+		return "array", ""
+	case "object":
+		return "object", ""
+	case "date":
+		return "string", "date"
+	case "datetime", "immutable_date", "immutable_datetime", "timestamp":
+		return "string", "date-time"
+	default:
+		// Could be a custom cast class
+		return "string", ""
+	}
+}
+
+// isImplementationClass checks if a class name suggests it's implementation rather than a schema.
+func isImplementationClass(name string) bool {
+	implementationSuffixes := []string{
+		"Controller",
+		"Service",
+		"Repository",
+		"Factory",
+		"Seeder",
+		"Middleware",
+		"Provider",
+		"Request",
+		"Resource",
+		"Policy",
+		"Observer",
+		"Event",
+		"Listener",
+		"Job",
+		"Mail",
+		"Notification",
+		"Console",
+		"Command",
+		"Exception",
+		"Handler",
+		"Kernel",
+		"Test",
+	}
+
+	for _, suffix := range implementationSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Register registers the Laravel plugin with the global registry.

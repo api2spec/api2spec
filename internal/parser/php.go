@@ -31,8 +31,41 @@ type PHPClass struct {
 	// Implements are the implemented interfaces
 	Implements []string
 
+	// Properties are the class properties
+	Properties []PHPProperty
+
 	// Methods are the class methods
 	Methods []PHPMethod
+
+	// IsEloquentModel indicates if this class extends Eloquent Model
+	IsEloquentModel bool
+
+	// Fillable contains Eloquent $fillable field names
+	Fillable []string
+
+	// Casts contains Eloquent $casts field type mappings
+	Casts map[string]string
+
+	// Line is the source line number
+	Line int
+}
+
+// PHPProperty represents a PHP class property.
+type PHPProperty struct {
+	// Name is the property name
+	Name string
+
+	// Type is the property type
+	Type string
+
+	// Visibility is the property visibility (public, private, protected)
+	Visibility string
+
+	// IsNullable indicates if the property can be null
+	IsNullable bool
+
+	// IsReadonly indicates if the property is readonly
+	IsReadonly bool
 
 	// Line is the source line number
 	Line int
@@ -69,6 +102,12 @@ type PHPParameter struct {
 
 	// IsOptional indicates if the parameter is optional
 	IsOptional bool
+
+	// IsPromoted indicates if this is a constructor promoted property (PHP 8+)
+	IsPromoted bool
+
+	// Visibility is set for promoted properties (public, private, protected)
+	Visibility string
 }
 
 // PHPRoute represents a Laravel route definition.
@@ -166,6 +205,18 @@ var (
 	// Matches method definitions
 	phpMethodRegex = regexp.MustCompile(`(?m)(public|private|protected)?\s*(?:static\s+)?function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*\??([\w\\|]+))?`)
 
+	// Matches traditional property declarations (must end with ; to distinguish from constructor params)
+	// public string $name; or public ?string $name = 'default';
+	phpPropertyRegex = regexp.MustCompile(`(?m)(public|private|protected)\s+(?:(readonly)\s+)?(\??\w+(?:\s*\|\s*\w+)*)\s+\$(\w+)\s*(?:=[^;]+)?;`)
+
+	// Matches Eloquent $fillable array
+	// protected $fillable = ['name', 'email', ...];
+	phpFillableRegex = regexp.MustCompile(`(?ms)\$fillable\s*=\s*\[(.*?)\]`)
+
+	// Matches Eloquent $casts array
+	// protected $casts = ['email_verified_at' => 'datetime', ...];
+	phpCastsRegex = regexp.MustCompile(`(?ms)\$casts\s*=\s*\[(.*?)\]`)
+
 	// Matches Laravel route definitions
 	// Route::get('/path', [Controller::class, 'method'])
 	phpRouteRegex = regexp.MustCompile(`(?m)Route::(get|post|put|patch|delete|options|any)\s*\(\s*['"]([^'"]+)['"]\s*,\s*(?:\[\s*([^:]+)::class\s*,\s*['"](\w+)['"]\s*\]|['"]([^'"]+)['"])`)
@@ -241,7 +292,10 @@ func (p *PHPParser) extractClasses(src string) []PHPClass {
 		class := PHPClass{
 			Line:       line,
 			Implements: []string{},
+			Properties: []PHPProperty{},
 			Methods:    []PHPMethod{},
+			Fillable:   []string{},
+			Casts:      make(map[string]string),
 		}
 
 		// Extract class name (group 1)
@@ -252,6 +306,8 @@ func (p *PHPParser) extractClasses(src string) []PHPClass {
 		// Extract parent class (group 2)
 		if match[4] >= 0 && match[5] >= 0 {
 			class.Extends = src[match[4]:match[5]]
+			// Check if this is an Eloquent model
+			class.IsEloquentModel = isEloquentModel(class.Extends)
 		}
 
 		// Extract implemented interfaces (group 3)
@@ -266,11 +322,26 @@ func (p *PHPParser) extractClasses(src string) []PHPClass {
 			}
 		}
 
-		// Find the class body and extract methods
+		// Find the class body and extract methods/properties
 		classStart := match[0]
 		classBody := p.findClassBody(src[classStart:])
 		if classBody != "" {
 			class.Methods = p.extractMethods(classBody, line)
+			class.Properties = p.extractProperties(classBody, line)
+
+			// Also extract constructor promoted properties
+			for _, method := range class.Methods {
+				if method.Name == "__construct" {
+					promotedProps := p.extractPromotedProperties(method, line)
+					class.Properties = append(class.Properties, promotedProps...)
+				}
+			}
+
+			// Extract Eloquent $fillable and $casts if this is a model
+			if class.IsEloquentModel {
+				class.Fillable = p.extractFillable(classBody)
+				class.Casts = p.extractCasts(classBody)
+			}
 		}
 
 		if class.Name != "" {
@@ -377,16 +448,56 @@ func (p *PHPParser) extractParameters(src string) []PHPParameter {
 			paramStr = strings.TrimSpace(paramStr[:idx])
 		}
 
-		// Split into type and name
+		// Split into parts
 		parts := strings.Fields(paramStr)
-		if len(parts) >= 2 {
-			// Handle nullable types
-			typeStr := parts[0]
-			typeStr = strings.TrimPrefix(typeStr, "?")
-			param.Type = typeStr
-			param.Name = strings.TrimPrefix(parts[len(parts)-1], "$")
-		} else if len(parts) == 1 {
-			param.Name = strings.TrimPrefix(parts[0], "$")
+
+		// Handle different formats:
+		// - $name (just name)
+		// - Type $name (type + name)
+		// - public Type $name (visibility + type + name) - constructor promotion
+		// - public readonly Type $name (visibility + readonly + type + name)
+
+		nameIdx := -1
+		for i, part := range parts {
+			if strings.HasPrefix(part, "$") {
+				nameIdx = i
+				break
+			}
+		}
+
+		if nameIdx == -1 && len(parts) > 0 {
+			// Last part is probably the name
+			nameIdx = len(parts) - 1
+		}
+
+		if nameIdx >= 0 {
+			param.Name = strings.TrimPrefix(parts[nameIdx], "$")
+
+			// Check for visibility modifiers (indicates constructor promotion)
+			for i := 0; i < nameIdx; i++ {
+				if isVisibilityModifier(parts[i]) {
+					param.IsPromoted = true
+					param.Visibility = parts[i]
+					break
+				}
+			}
+
+			// Find the type (usually the part just before the name)
+			// But skip visibility and readonly modifiers
+			for i := nameIdx - 1; i >= 0; i-- {
+				part := parts[i]
+				if isVisibilityModifier(part) || part == "readonly" {
+					continue
+				}
+				// This should be the type
+				typeStr := part
+				if strings.HasPrefix(typeStr, "?") {
+					param.IsOptional = true
+					typeStr = strings.TrimPrefix(typeStr, "?")
+				}
+				param.Type = typeStr
+				break
+			}
 		}
 
 		if param.Name != "" {
@@ -395,6 +506,159 @@ func (p *PHPParser) extractParameters(src string) []PHPParameter {
 	}
 
 	return params
+}
+
+// extractProperties extracts traditional property declarations from a class body.
+func (p *PHPParser) extractProperties(body string, baseLineOffset int) []PHPProperty {
+	var props []PHPProperty
+
+	matches := phpPropertyRegex.FindAllStringSubmatchIndex(body, -1)
+	for _, match := range matches {
+		if len(match) < 10 {
+			continue
+		}
+
+		line := baseLineOffset + countLines(body[:match[0]])
+
+		prop := PHPProperty{
+			Line: line,
+		}
+
+		// Extract visibility (group 1)
+		if match[2] >= 0 && match[3] >= 0 {
+			prop.Visibility = body[match[2]:match[3]]
+		}
+
+		// Extract readonly modifier (group 2)
+		if match[4] >= 0 && match[5] >= 0 {
+			prop.IsReadonly = true
+		}
+
+		// Extract type (group 3)
+		if match[6] >= 0 && match[7] >= 0 {
+			typeStr := body[match[6]:match[7]]
+			if strings.HasPrefix(typeStr, "?") {
+				prop.IsNullable = true
+				typeStr = strings.TrimPrefix(typeStr, "?")
+			}
+			prop.Type = typeStr
+		}
+
+		// Extract property name (group 4)
+		if match[8] >= 0 && match[9] >= 0 {
+			prop.Name = body[match[8]:match[9]]
+		}
+
+		if prop.Name != "" {
+			props = append(props, prop)
+		}
+	}
+
+	return props
+}
+
+// extractPromotedProperties extracts constructor promoted properties from a method.
+// PHP 8+ allows: public function __construct(public string $name, private int $age)
+func (p *PHPParser) extractPromotedProperties(method PHPMethod, classLine int) []PHPProperty {
+	var props []PHPProperty
+
+	for _, param := range method.Parameters {
+		if !param.IsPromoted {
+			continue
+		}
+
+		prop := PHPProperty{
+			Name:       param.Name,
+			Type:       param.Type,
+			Visibility: param.Visibility,
+			IsNullable: param.IsOptional,
+			Line:       method.Line,
+		}
+
+		props = append(props, prop)
+	}
+
+	return props
+}
+
+// isVisibilityModifier checks if a string is a PHP visibility modifier.
+func isVisibilityModifier(s string) bool {
+	switch s {
+	case "public", "private", "protected":
+		return true
+	}
+	return false
+}
+
+// isEloquentModel checks if a parent class indicates an Eloquent model.
+func isEloquentModel(extends string) bool {
+	eloquentParents := []string{
+		"Model",
+		"Eloquent",
+		"Authenticatable",
+		"Pivot",
+		"MorphPivot",
+	}
+	for _, parent := range eloquentParents {
+		if extends == parent || strings.HasSuffix(extends, "\\"+parent) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractFillable extracts field names from Eloquent $fillable array.
+func (p *PHPParser) extractFillable(body string) []string {
+	var fields []string
+
+	match := phpFillableRegex.FindStringSubmatch(body)
+	if len(match) < 2 {
+		return fields
+	}
+
+	// Parse the array contents - match quoted strings
+	contents := match[1]
+	stringRegex := regexp.MustCompile(`['"]([^'"]+)['"]`)
+	stringMatches := stringRegex.FindAllStringSubmatch(contents, -1)
+
+	for _, m := range stringMatches {
+		if len(m) >= 2 {
+			fields = append(fields, m[1])
+		}
+	}
+
+	return fields
+}
+
+// extractCasts extracts type mappings from Eloquent $casts array.
+func (p *PHPParser) extractCasts(body string) map[string]string {
+	casts := make(map[string]string)
+
+	match := phpCastsRegex.FindStringSubmatch(body)
+	if len(match) < 2 {
+		return casts
+	}
+
+	// Parse the array contents - match 'key' => 'value' patterns
+	contents := match[1]
+	// Handle both 'key' => 'value' and 'key' => Type::class
+	pairRegex := regexp.MustCompile(`['"]([^'"]+)['"]\s*=>\s*(?:['"]([^'"]+)['"]|(\w+)::class)`)
+	pairMatches := pairRegex.FindAllStringSubmatch(contents, -1)
+
+	for _, m := range pairMatches {
+		if len(m) >= 2 {
+			key := m[1]
+			value := m[2]
+			if value == "" && len(m) >= 4 {
+				value = m[3] // Class reference like Type::class
+			}
+			if value != "" {
+				casts[key] = value
+			}
+		}
+	}
+
+	return casts
 }
 
 // extractRoutes extracts Laravel route definitions.
