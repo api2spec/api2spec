@@ -1,3 +1,6 @@
+.claude/
+.beads/
+
 # Binaries
 /api2spec
 *.exe
@@ -26,7 +29,6 @@ vendor/
 *.swp
 *.swo
 *~
-.claude/
 
 # OS
 .DS_Store
@@ -42,4 +44,3 @@ dist/
 # Generated OpenAPI specs
 openapi.yaml
 openapi.json
-

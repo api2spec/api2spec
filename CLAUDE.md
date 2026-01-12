@@ -2,6 +2,39 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Issue Tracking
+
+This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --status in_progress  # Claim work
+bd close <id>         # Complete work
+bd sync               # Sync with git
+```
+
+## Session Completion (Landing the Plane)
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until changes are pushed.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues with `bd create` for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work with `bd close`, update in-progress items
+4. **Sync beads** - Run `bd sync` to commit beads changes
+5. **Commit and push** - Use the **commit-manager agent** to stage, commit, and push code changes
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- **NEVER run git add/commit/push commands directly** - always use the commit-manager agent
+- Use the commit-manager agent for ALL version control operations (staging, commits, pushes, PRs)
+- NEVER stop before pushing - that leaves work stranded locally
+- If push fails, resolve and retry until it succeeds
+
 ## License Header
 
 All Go source files must include this header:
