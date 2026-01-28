@@ -494,3 +494,201 @@ func findRoute(routes []types.Route, method, path string) *types.Route {
 	}
 	return nil
 }
+
+// ============================================================================
+// YAML Route Parsing Tests
+// ============================================================================
+
+// symfonyYAMLBasicRoute tests a basic YAML route with path, controller, and methods.
+const symfonyYAMLBasicRoute = `user_show:
+    path: /users/{id}
+    controller: App\Controller\UserController::show
+    methods: GET
+`
+
+// symfonyYAMLMultipleRoutes tests multiple routes in a single YAML file.
+const symfonyYAMLMultipleRoutes = `user_list:
+    path: /users
+    controller: App\Controller\UserController::index
+    methods: GET
+
+user_create:
+    path: /users
+    controller: App\Controller\UserController::create
+    methods: POST
+
+user_show:
+    path: /users/{id}
+    controller: App\Controller\UserController::show
+    methods: GET
+`
+
+// symfonyYAMLArrayMethods tests routes with array format methods [GET, POST].
+const symfonyYAMLArrayMethods = `resource_update:
+    path: /resources/{id}
+    controller: App\Controller\ResourceController::update
+    methods: [PUT, PATCH]
+`
+
+// symfonyYAMLNoMethods tests routes without explicit methods (should default to GET).
+const symfonyYAMLNoMethods = `default_route:
+    path: /default
+    controller: App\Controller\DefaultController::index
+`
+
+func TestExtractRoutesFromYAML_BasicRoute(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "config/routes.yaml",
+			Language: "yaml",
+			Content:  []byte(symfonyYAMLBasicRoute),
+		},
+	}
+
+	routes, err := p.ExtractRoutes(files)
+	require.NoError(t, err)
+	require.Len(t, routes, 1)
+
+	route := routes[0]
+	assert.Equal(t, "GET", route.Method)
+	assert.Equal(t, "/users/{id}", route.Path)
+	assert.Equal(t, "App\\Controller\\UserController::show", route.Handler)
+	assert.Equal(t, "config/routes.yaml", route.SourceFile)
+	assert.Greater(t, route.SourceLine, 0)
+
+	// Verify path parameter extraction
+	require.Len(t, route.Parameters, 1)
+	assert.Equal(t, "id", route.Parameters[0].Name)
+	assert.Equal(t, "path", route.Parameters[0].In)
+	assert.True(t, route.Parameters[0].Required)
+}
+
+func TestExtractRoutesFromYAML_MultipleRoutes(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "config/routes.yaml",
+			Language: "yaml",
+			Content:  []byte(symfonyYAMLMultipleRoutes),
+		},
+	}
+
+	routes, err := p.ExtractRoutes(files)
+	require.NoError(t, err)
+	require.Len(t, routes, 3)
+
+	// Verify first route: GET /users
+	listRoute := findRoute(routes, "GET", "/users")
+	require.NotNil(t, listRoute, "GET /users route not found")
+	assert.Contains(t, listRoute.Handler, "index")
+
+	// Verify second route: POST /users
+	createRoute := findRoute(routes, "POST", "/users")
+	require.NotNil(t, createRoute, "POST /users route not found")
+	assert.Contains(t, createRoute.Handler, "create")
+
+	// Verify third route: GET /users/{id}
+	showRoute := findRoute(routes, "GET", "/users/{id}")
+	require.NotNil(t, showRoute, "GET /users/{id} route not found")
+	assert.Contains(t, showRoute.Handler, "show")
+}
+
+func TestExtractRoutesFromYAML_ArrayMethods(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "config/routes.yaml",
+			Language: "yaml",
+			Content:  []byte(symfonyYAMLArrayMethods),
+		},
+	}
+
+	routes, err := p.ExtractRoutes(files)
+	require.NoError(t, err)
+	require.Len(t, routes, 2)
+
+	// Should create separate routes for PUT and PATCH
+	methods := make(map[string]bool)
+	for _, r := range routes {
+		methods[r.Method] = true
+		assert.Equal(t, "/resources/{id}", r.Path)
+	}
+
+	assert.True(t, methods["PUT"], "PUT method not found")
+	assert.True(t, methods["PATCH"], "PATCH method not found")
+}
+
+func TestExtractRoutesFromYAML_MissingMethodsDefaultsToGET(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "config/routes.yaml",
+			Language: "yaml",
+			Content:  []byte(symfonyYAMLNoMethods),
+		},
+	}
+
+	routes, err := p.ExtractRoutes(files)
+	require.NoError(t, err)
+	require.Len(t, routes, 1)
+
+	route := routes[0]
+	assert.Equal(t, "GET", route.Method, "Missing methods should default to GET")
+	assert.Equal(t, "/default", route.Path)
+}
+
+func TestParseYAMLMethods(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "single method",
+			input:    "GET",
+			expected: []string{"GET"},
+		},
+		{
+			name:     "array format",
+			input:    "[GET, POST]",
+			expected: []string{"GET", "POST"},
+		},
+		{
+			name:     "array with quotes",
+			input:    "['GET', 'POST']",
+			expected: []string{"GET", "POST"},
+		},
+		{
+			name:     "array with double quotes",
+			input:    `["PUT", "PATCH", "DELETE"]`,
+			expected: []string{"PUT", "PATCH", "DELETE"},
+		},
+		{
+			name:     "lowercase converted to uppercase",
+			input:    "[get, post]",
+			expected: []string{"GET", "POST"},
+		},
+		{
+			name:     "empty string defaults to GET",
+			input:    "",
+			expected: []string{"GET"},
+		},
+		{
+			name:     "single with quotes",
+			input:    "'POST'",
+			expected: []string{"POST"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseYAMLMethods(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

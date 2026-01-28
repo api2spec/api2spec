@@ -119,7 +119,16 @@ type ElixirResource struct {
 	Line int
 }
 
-// EctoSchema represents an Ecto schema definition.
+// EctoSchema represents an Ecto schema definition extracted from Phoenix/Elixir source files.
+//
+// Ecto is the database wrapper and query generator for Elixir, commonly used with Phoenix.
+// This type is populated when parsing Elixir files that contain either:
+//   - Regular schemas: schema "table_name" do ... end
+//   - Embedded schemas: embedded_schema do ... end (for nested structs without database tables)
+//
+// EctoSchema captures the module context, table mapping, and field definitions to enable
+// schema extraction for OpenAPI generation. The schema information helps infer request/response
+// body structures when Phoenix controllers interact with Ecto models.
 type EctoSchema struct {
 	// ModuleName is the full module name containing the schema
 	ModuleName string
@@ -140,7 +149,21 @@ type EctoSchema struct {
 	SourceFile string
 }
 
-// EctoField represents an Ecto schema field.
+// EctoField represents an Ecto schema field extracted from an EctoSchema definition.
+//
+// Fields are populated when parsing Ecto schema blocks and correspond to the field macro:
+//
+//	field :name, :string
+//	field :age, :integer, default: 0
+//
+// The Type field contains Ecto types (e.g., :string, :integer, :boolean, :decimal, :utc_datetime)
+// which can be mapped to JSON Schema types for OpenAPI generation. Common mappings:
+//   - :string -> string
+//   - :integer -> integer
+//   - :boolean -> boolean
+//   - :float, :decimal -> number
+//   - :date, :utc_datetime, :naive_datetime -> string (with format)
+//   - :map, :array -> object/array
 type EctoField struct {
 	// Name is the field name
 	Name string
