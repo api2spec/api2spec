@@ -121,8 +121,14 @@ var (
 	// Matches Drogon METHOD_ADD macro
 	drogonMethodAddRegex = regexp.MustCompile(`(?m)METHOD_ADD\s*\(\s*(\w+)\s*::\s*(\w+)\s*,\s*"([^"]+)"\s*(?:,\s*(Get|Post|Put|Delete|Patch|Head|Options))*`)
 
-	// Matches Drogon app().registerHandler lambda style
+	// Matches Drogon app().registerHandler lambda style (path only, no explicit method)
+	// Used as fallback when no explicit method is specified
 	drogonRegisterHandlerRegex = regexp.MustCompile(`(?m)(?:app\(\)|drogon::app\(\))\s*\.\s*registerHandler\s*\(\s*"([^"]+)"`)
+
+	// Matches Drogon app().registerHandler with explicit HTTP method like {Get}, {Post}, etc.
+	// Captures: (1) path, (2) HTTP method
+	// Uses (?s) for dotall mode and .*? for non-greedy matching across the lambda body
+	drogonRegisterHandlerMethodRegex = regexp.MustCompile(`(?s)(?:app\(\)|drogon::app\(\))\s*\.\s*registerHandler\s*\(\s*"([^"]+)".*?,\s*\{(Get|Post|Put|Delete|Patch|Head|Options)\}`)
 
 	// Matches Oat++ ENDPOINT macro
 	oatppEndpointRegex = regexp.MustCompile(`(?m)ENDPOINT\s*\(\s*"(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)"\s*,\s*"([^"]+)"\s*,\s*(\w+)`)
@@ -396,7 +402,43 @@ func (p *CppParser) extractDrogonMethodAddRoutes(src string) []CppRoute {
 // extractDrogonRegisterHandlerRoutes extracts routes from Drogon app().registerHandler calls.
 func (p *CppParser) extractDrogonRegisterHandlerRoutes(src string) []CppRoute {
 	var routes []CppRoute
+	pathsWithMethod := make(map[string]bool)
 
+	// First, extract routes with explicit HTTP methods using the more specific regex
+	// This captures patterns like: app().registerHandler("/path", [...], {Get})
+	methodMatches := drogonRegisterHandlerMethodRegex.FindAllStringSubmatchIndex(src, -1)
+	for _, match := range methodMatches {
+		if len(match) < 6 {
+			continue
+		}
+
+		line := countLines(src[:match[0]])
+
+		route := CppRoute{
+			Line:    line,
+			Method:  "GET", // Default
+			Handler: "lambda",
+		}
+
+		// Extract path (group 1)
+		if match[2] >= 0 && match[3] >= 0 {
+			route.Path = src[match[2]:match[3]]
+		}
+
+		// Extract HTTP method (group 2) - e.g., Get, Post, Put, Delete
+		if match[4] >= 0 && match[5] >= 0 {
+			route.Method = strings.ToUpper(src[match[4]:match[5]])
+		}
+
+		if route.Path != "" {
+			routes = append(routes, route)
+			// Track this path so we don't double-count with the fallback regex
+			pathsWithMethod[route.Path] = true
+		}
+	}
+
+	// Then, extract routes without explicit methods (fallback to GET)
+	// This captures patterns like: app().registerHandler("/path", [...])
 	matches := drogonRegisterHandlerRegex.FindAllStringSubmatchIndex(src, -1)
 	for _, match := range matches {
 		if len(match) < 4 {
@@ -407,7 +449,7 @@ func (p *CppParser) extractDrogonRegisterHandlerRoutes(src string) []CppRoute {
 
 		route := CppRoute{
 			Line:    line,
-			Method:  "GET", // Default, would need more context to determine
+			Method:  "GET", // Default when no explicit method
 			Handler: "lambda",
 		}
 
@@ -416,7 +458,8 @@ func (p *CppParser) extractDrogonRegisterHandlerRoutes(src string) []CppRoute {
 			route.Path = src[match[2]:match[3]]
 		}
 
-		if route.Path != "" {
+		// Skip if we already found this path with an explicit method
+		if route.Path != "" && !pathsWithMethod[route.Path] {
 			routes = append(routes, route)
 		}
 	}

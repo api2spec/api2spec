@@ -136,44 +136,99 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 	return routes, nil
 }
 
+// endpointInfo holds information about a parsed endpoint class.
+type endpointInfo struct {
+	name         string
+	requestType  string
+	responseType string
+	startLine    int
+	endLine      int
+}
+
 // extractRoutesFromFile extracts routes from a single C# file.
 func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) []types.Route {
 	var routes []types.Route
-	content := string(file.Content)
-	lines := strings.Split(content, "\n")
+	lines := strings.Split(string(file.Content), "\n")
 
-	// Find endpoint class
-	endpointName := ""
-	requestType := ""
-	responseType := ""
+	// Find all endpoint classes and their line ranges
+	endpoints := p.findEndpointClasses(lines)
 
-	if match := endpointWithResponseRegex.FindStringSubmatch(content); len(match) > 3 {
-		endpointName = match[1]
-		requestType = match[2]
-		responseType = match[3]
-	} else if match := endpointNoResponseRegex.FindStringSubmatch(content); len(match) > 2 {
-		endpointName = match[1]
-		requestType = match[2]
-	} else if match := endpointClassRegex.FindStringSubmatch(content); len(match) > 1 {
-		endpointName = match[1]
-		if len(match) > 2 && match[2] != "" {
-			// Parse generic types
-			types := strings.Split(match[2], ",")
-			if len(types) > 0 {
-				requestType = strings.TrimSpace(types[0])
+	// For each endpoint, find the route configuration in its Configure() method
+	for _, ep := range endpoints {
+		epRoutes := p.extractRoutesFromEndpoint(ep, lines, file.Path)
+		routes = append(routes, epRoutes...)
+	}
+
+	return routes
+}
+
+// findEndpointClasses finds all FastEndpoints endpoint classes in the file.
+func (p *Plugin) findEndpointClasses(lines []string) []endpointInfo {
+	var endpoints []endpointInfo
+
+	for i, line := range lines {
+		lineNum := i + 1
+
+		var ep *endpointInfo
+
+		// Check for Endpoint<TRequest, TResponse>
+		if match := endpointWithResponseRegex.FindStringSubmatch(line); len(match) > 3 {
+			ep = &endpointInfo{
+				name:         match[1],
+				requestType:  match[2],
+				responseType: match[3],
+				startLine:    lineNum,
 			}
-			if len(types) > 1 {
-				responseType = strings.TrimSpace(types[1])
+		} else if match := endpointNoResponseRegex.FindStringSubmatch(line); len(match) > 2 {
+			// Endpoint<TRequest> without response
+			ep = &endpointInfo{
+				name:        match[1],
+				requestType: match[2],
+				startLine:   lineNum,
 			}
+		} else if match := endpointClassRegex.FindStringSubmatch(line); len(match) > 1 {
+			// EndpointWithoutRequest or other variants
+			ep = &endpointInfo{
+				name:      match[1],
+				startLine: lineNum,
+			}
+			if len(match) > 2 && match[2] != "" {
+				// Parse generic types from EndpointWithoutRequest<TResponse>
+				typeArgs := strings.Split(match[2], ",")
+				if len(typeArgs) == 1 {
+					ep.responseType = strings.TrimSpace(typeArgs[0])
+				} else if len(typeArgs) >= 2 {
+					ep.requestType = strings.TrimSpace(typeArgs[0])
+					ep.responseType = strings.TrimSpace(typeArgs[1])
+				}
+			}
+		}
+
+		if ep != nil {
+			// Find the end of this class (next class or end of file)
+			ep.endLine = len(lines)
+			for j := i + 1; j < len(lines); j++ {
+				if endpointClassRegex.MatchString(lines[j]) ||
+					endpointWithResponseRegex.MatchString(lines[j]) ||
+					endpointNoResponseRegex.MatchString(lines[j]) {
+					ep.endLine = j
+					break
+				}
+			}
+			endpoints = append(endpoints, *ep)
 		}
 	}
 
-	if endpointName == "" {
-		return routes
-	}
+	return endpoints
+}
 
-	// Find HTTP methods and paths
-	for i, line := range lines {
+// extractRoutesFromEndpoint extracts routes from a specific endpoint class.
+func (p *Plugin) extractRoutesFromEndpoint(ep endpointInfo, lines []string, filePath string) []types.Route {
+	var routes []types.Route
+
+	// Look for Configure() method and route configuration within the endpoint's line range
+	for i := ep.startLine - 1; i < ep.endLine && i < len(lines); i++ {
+		line := lines[i]
 		lineNum := i + 1
 
 		// Check for Http method configuration: Get("/path"), Post("/path"), etc.
@@ -181,7 +236,7 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) []types.Route {
 			method := strings.ToUpper(match[1])
 			path := match[2]
 
-			route := p.createRoute(method, path, endpointName, requestType, responseType, file.Path, lineNum)
+			route := p.createRoute(method, path, ep.name, ep.requestType, ep.responseType, filePath, lineNum)
 			routes = append(routes, route)
 		}
 
@@ -189,14 +244,17 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) []types.Route {
 		if match := routesRegex.FindStringSubmatch(line); len(match) > 1 {
 			path := match[1]
 
-			// Look for Verbs() to determine HTTP methods
+			// Look for Verbs() within this endpoint's range to determine HTTP methods
 			methods := []string{"GET"} // Default
-			if verbMatch := verbsRegex.FindStringSubmatch(content); len(verbMatch) > 1 {
-				methods = parseVerbsMethods(verbMatch[1])
+			for j := ep.startLine - 1; j < ep.endLine && j < len(lines); j++ {
+				if verbMatch := verbsRegex.FindStringSubmatch(lines[j]); len(verbMatch) > 1 {
+					methods = parseVerbsMethods(verbMatch[1])
+					break
+				}
 			}
 
 			for _, method := range methods {
-				route := p.createRoute(method, path, endpointName, requestType, responseType, file.Path, lineNum)
+				route := p.createRoute(method, path, ep.name, ep.requestType, ep.responseType, filePath, lineNum)
 				routes = append(routes, route)
 			}
 		}

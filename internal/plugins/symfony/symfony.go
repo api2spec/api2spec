@@ -34,7 +34,7 @@ func (p *Plugin) Name() string {
 
 // Extensions returns the file extensions this plugin handles.
 func (p *Plugin) Extensions() []string {
-	return []string{".php"}
+	return []string{".php", ".yaml", ".yml"}
 }
 
 // Info returns plugin metadata.
@@ -110,12 +110,14 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 	var routes []types.Route
 
 	for _, file := range files {
-		if file.Language != "php" {
-			continue
+		switch file.Language {
+		case "php":
+			fileRoutes := p.extractRoutesFromFile(file)
+			routes = append(routes, fileRoutes...)
+		case "yaml":
+			fileRoutes := p.extractRoutesFromYAML(file)
+			routes = append(routes, fileRoutes...)
 		}
-
-		fileRoutes := p.extractRoutesFromFile(file)
-		routes = append(routes, fileRoutes...)
 	}
 
 	return routes, nil
@@ -218,6 +220,154 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) []types.Route {
 	}
 
 	return routes
+}
+
+// YAML route regex patterns
+var (
+	// Matches route path: "  path: /users/{id}"
+	yamlPathRegex = regexp.MustCompile(`^\s+path:\s*(.+)$`)
+	// Matches controller: "  controller: App\Controller\UserController::show"
+	yamlControllerRegex = regexp.MustCompile(`^\s+controller:\s*(.+)$`)
+	// Matches methods: "  methods: GET" or "  methods: [GET, POST]"
+	yamlMethodsRegex = regexp.MustCompile(`^\s+methods:\s*(.+)$`)
+	// Matches route name (top-level key without leading spaces)
+	yamlRouteNameRegex = regexp.MustCompile(`^([a-zA-Z_][a-zA-Z0-9_]*):\s*$`)
+)
+
+// extractRoutesFromYAML extracts routes from a Symfony YAML routes file.
+func (p *Plugin) extractRoutesFromYAML(file scanner.SourceFile) []types.Route {
+	var routes []types.Route
+	content := string(file.Content)
+	lines := strings.Split(content, "\n")
+
+	// Parse YAML routes - simple line-by-line parsing
+	var currentRoute struct {
+		name       string
+		path       string
+		controller string
+		methods    []string
+		startLine  int
+	}
+
+	flushRoute := func() {
+		if currentRoute.path != "" {
+			methods := currentRoute.methods
+			if len(methods) == 0 {
+				methods = []string{"GET"}
+			}
+
+			// Extract handler name from controller
+			handler := currentRoute.controller
+			handlerName := ""
+			if idx := strings.LastIndex(handler, "::"); idx != -1 {
+				handlerName = handler[idx+2:]
+			}
+
+			// Infer tag from controller class name
+			className := ""
+			if idx := strings.LastIndex(handler, "\\"); idx != -1 {
+				remaining := handler[idx+1:]
+				if colonIdx := strings.Index(remaining, "::"); colonIdx != -1 {
+					className = remaining[:colonIdx]
+				}
+			}
+
+			for _, method := range methods {
+				fullPath := convertSymfonyPathParams(currentRoute.path)
+				params := extractPathParams(fullPath)
+				operationID := generateOperationID(method, fullPath, handlerName)
+				tags := inferTags(fullPath, className)
+
+				routes = append(routes, types.Route{
+					Method:      method,
+					Path:        fullPath,
+					Handler:     handler,
+					OperationID: operationID,
+					Tags:        tags,
+					Parameters:  params,
+					SourceFile:  file.Path,
+					SourceLine:  currentRoute.startLine,
+				})
+			}
+		}
+		currentRoute.name = ""
+		currentRoute.path = ""
+		currentRoute.controller = ""
+		currentRoute.methods = nil
+		currentRoute.startLine = 0
+	}
+
+	for i, line := range lines {
+		lineNum := i + 1
+
+		// Check for new route definition (top-level key)
+		if match := yamlRouteNameRegex.FindStringSubmatch(line); len(match) > 1 {
+			// Flush previous route if any
+			flushRoute()
+			currentRoute.name = match[1]
+			currentRoute.startLine = lineNum
+			continue
+		}
+
+		// Skip if we're not in a route definition
+		if currentRoute.name == "" {
+			continue
+		}
+
+		// Check for path
+		if match := yamlPathRegex.FindStringSubmatch(line); len(match) > 1 {
+			currentRoute.path = strings.TrimSpace(match[1])
+			continue
+		}
+
+		// Check for controller
+		if match := yamlControllerRegex.FindStringSubmatch(line); len(match) > 1 {
+			currentRoute.controller = strings.TrimSpace(match[1])
+			continue
+		}
+
+		// Check for methods
+		if match := yamlMethodsRegex.FindStringSubmatch(line); len(match) > 1 {
+			methodsStr := strings.TrimSpace(match[1])
+			currentRoute.methods = parseYAMLMethods(methodsStr)
+			continue
+		}
+	}
+
+	// Flush last route
+	flushRoute()
+
+	return routes
+}
+
+// parseYAMLMethods parses methods from YAML format.
+// Handles both "GET" and "[GET, POST]" formats.
+func parseYAMLMethods(s string) []string {
+	s = strings.TrimSpace(s)
+
+	// Handle array format: [GET, POST]
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		s = strings.TrimPrefix(s, "[")
+		s = strings.TrimSuffix(s, "]")
+		parts := strings.Split(s, ",")
+		var methods []string
+		for _, part := range parts {
+			method := strings.TrimSpace(part)
+			method = strings.Trim(method, "'\"")
+			if method != "" {
+				methods = append(methods, strings.ToUpper(method))
+			}
+		}
+		return methods
+	}
+
+	// Handle single method: GET
+	method := strings.Trim(s, "'\"")
+	if method != "" {
+		return []string{strings.ToUpper(method)}
+	}
+
+	return []string{"GET"}
 }
 
 // findNextFunction finds the next public function after the given line.

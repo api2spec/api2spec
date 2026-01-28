@@ -358,7 +358,7 @@ func toTitleCase(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// ExtractSchemas extracts schema definitions from Java DTOs.
+// ExtractSchemas extracts schema definitions from Java DTOs, records, and model classes.
 func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
 	var schemas []types.Schema
 
@@ -375,12 +375,8 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 				continue
 			}
 
-			// Check if this looks like a DTO
-			if strings.HasSuffix(class.Name, "Dto") ||
-				strings.HasSuffix(class.Name, "DTO") ||
-				strings.HasSuffix(class.Name, "Request") ||
-				strings.HasSuffix(class.Name, "Response") {
-
+			// Check if this looks like a schema class
+			if p.isSchemaClass(class, file.Path) {
 				schema := p.classToSchema(class)
 				if schema != nil {
 					schemas = append(schemas, *schema)
@@ -392,6 +388,49 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 	return schemas, nil
 }
 
+// isSchemaClass determines if a class should be extracted as a schema.
+func (p *Plugin) isSchemaClass(class parser.JavaClass, filePath string) bool {
+	// Records are typically data objects
+	if class.IsRecord {
+		return true
+	}
+
+	// Check for DTO/Request/Response naming conventions
+	if strings.HasSuffix(class.Name, "Dto") ||
+		strings.HasSuffix(class.Name, "DTO") ||
+		strings.HasSuffix(class.Name, "Request") ||
+		strings.HasSuffix(class.Name, "Response") ||
+		strings.HasSuffix(class.Name, "Entity") {
+		return true
+	}
+
+	// Check if file is in a model/domain/dto/entity directory
+	pathLower := strings.ToLower(filePath)
+	if strings.Contains(pathLower, "/model/") ||
+		strings.Contains(pathLower, "/domain/") ||
+		strings.Contains(pathLower, "/dto/") ||
+		strings.Contains(pathLower, "/entity/") ||
+		strings.Contains(pathLower, "/entities/") {
+		return true
+	}
+
+	// Check for JPA/Hibernate annotations
+	if class.HasAnnotation("Entity") ||
+		class.HasAnnotation("Table") ||
+		class.HasAnnotation("Document") {
+		return true
+	}
+
+	// Check for Lombok data annotations
+	if class.HasAnnotation("Data") ||
+		class.HasAnnotation("Value") ||
+		class.HasAnnotation("Builder") {
+		return true
+	}
+
+	return false
+}
+
 // classToSchema converts a Java class to an OpenAPI schema.
 func (p *Plugin) classToSchema(class parser.JavaClass) *types.Schema {
 	schema := &types.Schema{
@@ -401,8 +440,47 @@ func (p *Plugin) classToSchema(class parser.JavaClass) *types.Schema {
 		Required:   []string{},
 	}
 
-	// In a real implementation, we'd parse fields directly
-	// For now, we use getter methods
+	// For records, use the record components (fields)
+	if class.IsRecord && len(class.RecordComponents) > 0 {
+		for _, field := range class.RecordComponents {
+			openAPIType, format := parser.JavaTypeToOpenAPI(field.Type)
+			propSchema := &types.Schema{
+				Type:   openAPIType,
+				Format: format,
+			}
+
+			schema.Properties[field.Name] = propSchema
+
+			// Record components are always required (no null by default)
+			schema.Required = append(schema.Required, field.Name)
+		}
+		return schema
+	}
+
+	// For regular classes, check for fields first
+	if len(class.Fields) > 0 {
+		for _, field := range class.Fields {
+			openAPIType, format := parser.JavaTypeToOpenAPI(field.Type)
+			propSchema := &types.Schema{
+				Type:   openAPIType,
+				Format: format,
+			}
+
+			schema.Properties[field.Name] = propSchema
+
+			// Check for @NotNull, @NonNull annotations to determine required
+			for _, anno := range field.Annotations {
+				if anno.Name == "NotNull" || anno.Name == "NonNull" ||
+					anno.Name == "NotBlank" || anno.Name == "NotEmpty" {
+					schema.Required = append(schema.Required, field.Name)
+					break
+				}
+			}
+		}
+		return schema
+	}
+
+	// Fallback: infer from getter methods
 	for _, method := range class.Methods {
 		if strings.HasPrefix(method.Name, "get") && len(method.Parameters) == 0 {
 			propName := strings.TrimPrefix(method.Name, "get")

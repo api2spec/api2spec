@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"golang.org/x/text/cases"
@@ -122,8 +123,11 @@ var (
 	// Matches type alias definitions (type API = ...)
 	servantTypeAliasRegex = regexp.MustCompile(`(?m)^type\s+(\w+)\s*=\s*`)
 
-	// Matches Servant HTTP method combinators
-	servantMethodRegex = regexp.MustCompile(`(Get|Post|Put|Delete|Patch|Head|Options)\s*'\[\s*(\w+)\s*\]`)
+	// Matches Servant HTTP method combinators (including variants like PostCreated, GetNoContent, etc.)
+	// Standard forms: Get '[JSON] User, Post '[JSON] User
+	// Created forms: PostCreated '[JSON] User, PutCreated '[JSON] User
+	// NoContent forms: GetNoContent, DeleteNoContent, PostNoContent
+	servantMethodRegex = regexp.MustCompile(`(Get|Post|Put|Delete|Patch|Head|Options)(?:Created|NoContent|Accepted)?\s*(?:'\[\s*\w+\s*\])?`)
 
 	// Matches Servant path segment: "users" :>
 	servantPathSegmentRegex = regexp.MustCompile(`"([^"]+)"\s*:>`)
@@ -148,6 +152,9 @@ var (
 
 	// Matches brace-style path parameters
 	braceParamRegex = regexp.MustCompile(`\{([^}]+)\}`)
+
+	// Matches HTTP method name (for extraction) including variants
+	servantMethodExtractRegex = regexp.MustCompile(`\b(Get|Post|Put|Delete|Patch|Head|Options)(?:Created|NoContent|Accepted)?\b`)
 )
 
 // extractServantEndpoints extracts Servant API endpoint definitions from Haskell source code.
@@ -158,23 +165,171 @@ func (p *Plugin) extractServantEndpoints(src, filePath string) []types.Route {
 	typeAliases := p.extractTypeAliases(src)
 
 	for _, alias := range typeAliases {
-		// Skip combined APIs (they reference other types)
-		if servantCombinedAPIRegex.MatchString(alias.Definition) {
-			continue
-		}
-
-		// Check if this looks like a Servant endpoint
+		// Check if this looks like a Servant endpoint (has an HTTP method)
 		if !servantMethodRegex.MatchString(alias.Definition) {
 			continue
 		}
 
-		route := p.parseServantEndpoint(alias, filePath)
+		// Check if it's a combined API with :<|>
+		if servantCombinedAPIRegex.MatchString(alias.Definition) {
+			// Parse combined API - split by :<|> and process each segment
+			combinedRoutes := p.parseCombinedAPI(alias, filePath)
+			routes = append(routes, combinedRoutes...)
+		} else {
+			// Single endpoint
+			route := p.parseServantEndpoint(alias, filePath)
+			if route != nil {
+				routes = append(routes, *route)
+			}
+		}
+	}
+
+	return routes
+}
+
+// parseCombinedAPI parses a Servant type definition that combines multiple endpoints with :<|>.
+// It handles both simple combined APIs and nested APIs with shared path prefixes.
+func (p *Plugin) parseCombinedAPI(alias typeAlias, filePath string) []types.Route {
+	var routes []types.Route
+
+	def := alias.Definition
+
+	// Check if there's a shared path prefix before parentheses
+	// e.g., "users" :> ( Get ... :<|> Capture ... )
+	prefix, body := p.extractPrefixAndBody(def)
+
+	// Split by :<|> to get individual endpoints
+	segments := p.splitByAlternative(body)
+
+	for i, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+
+		// Skip if this is just a type reference (no HTTP method)
+		if !servantMethodRegex.MatchString(segment) {
+			continue
+		}
+
+		// Prepend the shared prefix if there is one
+		fullDef := segment
+		if prefix != "" {
+			fullDef = prefix + " :> " + segment
+		}
+
+		segmentAlias := typeAlias{
+			Name:       alias.Name + "_" + strconv.Itoa(i),
+			Definition: fullDef,
+			Line:       alias.Line,
+		}
+
+		route := p.parseServantEndpoint(segmentAlias, filePath)
 		if route != nil {
+			// Use a better handler name based on the path and method
+			route.Handler = alias.Name
+			route.OperationID = generateOperationID(route.Method, route.Path, "")
 			routes = append(routes, *route)
 		}
 	}
 
 	return routes
+}
+
+// extractPrefixAndBody extracts a shared path prefix before parentheses.
+// e.g., "users" :> ( Get ... ) returns ("users", "Get ...")
+// e.g., "users" :> Get ... returns ("", "users" :> Get ...")
+func (p *Plugin) extractPrefixAndBody(def string) (string, string) {
+	// Look for pattern: prefix :> ( body ) or prefix :> (body)
+	// Find the opening parenthesis
+	parenIdx := strings.Index(def, "(")
+	if parenIdx == -1 {
+		// No parentheses, return the whole thing as body
+		return "", def
+	}
+
+	// Find the prefix before the parenthesis
+	beforeParen := strings.TrimSpace(def[:parenIdx])
+	if !strings.HasSuffix(beforeParen, ":>") {
+		// The :> might have spaces, check more carefully
+		lastArrow := strings.LastIndex(beforeParen, ":>")
+		if lastArrow == -1 {
+			return "", def
+		}
+		beforeParen = strings.TrimSpace(beforeParen[:lastArrow])
+	} else {
+		beforeParen = strings.TrimSpace(strings.TrimSuffix(beforeParen, ":>"))
+	}
+
+	// Extract the body inside the parentheses
+	// Find matching closing paren
+	body := p.extractParenBody(def[parenIdx:])
+
+	return beforeParen, body
+}
+
+// extractParenBody extracts the content inside parentheses, handling nesting.
+func (p *Plugin) extractParenBody(s string) string {
+	if len(s) == 0 || s[0] != '(' {
+		return s
+	}
+
+	depth := 0
+	start := 1
+	for i, ch := range s {
+		if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(s[start:i])
+			}
+		}
+	}
+
+	// Unmatched parens, return content after first paren
+	return strings.TrimSpace(s[1:])
+}
+
+// splitByAlternative splits a Servant type definition by :<|> while respecting parentheses.
+func (p *Plugin) splitByAlternative(def string) []string {
+	var segments []string
+	var current strings.Builder
+	depth := 0
+
+	i := 0
+	for i < len(def) {
+		ch := def[i]
+
+		if ch == '(' {
+			depth++
+			current.WriteByte(ch)
+			i++
+		} else if ch == ')' {
+			depth--
+			current.WriteByte(ch)
+			i++
+		} else if depth == 0 && i+3 < len(def) && def[i:i+4] == ":<|>" {
+			// Found a :<|> at top level
+			seg := strings.TrimSpace(current.String())
+			if seg != "" {
+				segments = append(segments, seg)
+			}
+			current.Reset()
+			i += 4
+		} else {
+			current.WriteByte(ch)
+			i++
+		}
+	}
+
+	// Don't forget the last segment
+	seg := strings.TrimSpace(current.String())
+	if seg != "" {
+		segments = append(segments, seg)
+	}
+
+	return segments
 }
 
 // typeAlias represents a Haskell type alias.
@@ -327,9 +482,9 @@ func (p *Plugin) parseServantEndpoint(alias typeAlias, filePath string) *types.R
 		}
 	}
 
-	// Extract HTTP method and content type
-	methodMatch := servantMethodRegex.FindStringSubmatch(def)
-	if len(methodMatch) > 2 {
+	// Extract HTTP method using the extraction regex (handles PostCreated, DeleteNoContent, etc.)
+	methodMatch := servantMethodExtractRegex.FindStringSubmatch(def)
+	if len(methodMatch) > 1 {
 		route.Method = strings.ToUpper(methodMatch[1])
 	}
 

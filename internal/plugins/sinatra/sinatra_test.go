@@ -557,6 +557,76 @@ func TestInferTags(t *testing.T) {
 	}
 }
 
+func TestIsTestFile(t *testing.T) {
+	p := New()
+
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		// Test files should be detected
+		{"/project/spec/users_spec.rb", true},
+		{"/project/spec/health_spec.rb", true},
+		{"/project/spec/spec_helper.rb", true},
+		{"/project/test/users_test.rb", true},
+		{"/project/test/test_helper.rb", true},
+		{"spec/app_spec.rb", true},
+		{"test/app_test.rb", true},
+		// Non-test files should not be detected
+		{"/project/app.rb", false},
+		{"/project/lib/users.rb", false},
+		{"/project/config/routes.rb", false},
+		{"app.rb", false},
+		// Edge cases
+		{"/project/specific/routes.rb", false}, // contains 'spec' but not /spec/
+		{"/project/test_data.rb", false},       // contains 'test' but not /test/
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			result := p.isTestFile(tt.path)
+			assert.Equal(t, tt.expected, result, "isTestFile(%q) should be %v", tt.path, tt.expected)
+		})
+	}
+}
+
+func TestPlugin_ExtractRoutes_IgnoresSpecFiles(t *testing.T) {
+	p := New()
+
+	// Spec file with test helper calls that look like routes
+	specCode := `
+require_relative 'spec_helper'
+
+RSpec.describe "Users API" do
+  describe "GET /users" do
+    it "returns a list of users" do
+      get '/users'
+      expect(last_response).to be_ok
+    end
+  end
+
+  describe "POST /users" do
+    it "creates a user" do
+      post '/users', { name: 'Alice' }.to_json
+      expect(last_response.status).to eq(201)
+    end
+  end
+end
+`
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "/project/spec/users_spec.rb",
+			Language: "ruby",
+			Content:  []byte(specCode),
+		},
+	}
+
+	routes, err := p.ExtractRoutes(files)
+	require.NoError(t, err)
+	assert.Empty(t, routes, "spec files should not contribute any routes")
+}
+
 // Helper to find a route by method and path
 func findRoute(routes []types.Route, method, path string) *types.Route {
 	for i := range routes {

@@ -17,6 +17,7 @@ import (
 	"github.com/api2spec/api2spec/internal/parser"
 	"github.com/api2spec/api2spec/internal/plugins"
 	"github.com/api2spec/api2spec/internal/scanner"
+	"github.com/api2spec/api2spec/internal/util"
 	"github.com/api2spec/api2spec/pkg/types"
 )
 
@@ -67,6 +68,7 @@ func (p *Plugin) Info() plugins.PluginInfo {
 }
 
 // Detect checks if ASP.NET Core is used in the project.
+// It returns false for projects using FastEndpoints (which has its own plugin).
 func (p *Plugin) Detect(projectRoot string) (bool, error) {
 	// Look for .csproj files with AspNetCore reference
 	csprojFiles, err := filepath.Glob(filepath.Join(projectRoot, "*.csproj"))
@@ -75,6 +77,10 @@ func (p *Plugin) Detect(projectRoot string) (bool, error) {
 	}
 
 	for _, csproj := range csprojFiles {
+		// Check if this project uses FastEndpoints - if so, skip (use fastendpoints plugin)
+		if found, _ := p.checkCsprojForFastEndpoints(csproj); found {
+			return false, nil
+		}
 		if found, _ := p.checkCsprojForAspNet(csproj); found {
 			return true, nil
 		}
@@ -90,10 +96,33 @@ func (p *Plugin) Detect(projectRoot string) (bool, error) {
 		if entry.IsDir() {
 			subCsproj := filepath.Join(projectRoot, entry.Name(), entry.Name()+".csproj")
 			if _, err := os.Stat(subCsproj); err == nil {
+				// Check if this project uses FastEndpoints - if so, skip
+				if found, _ := p.checkCsprojForFastEndpoints(subCsproj); found {
+					return false, nil
+				}
 				if found, _ := p.checkCsprojForAspNet(subCsproj); found {
 					return true, nil
 				}
 			}
+		}
+	}
+
+	return false, nil
+}
+
+// checkCsprojForFastEndpoints checks if a .csproj file references FastEndpoints.
+func (p *Plugin) checkCsprojForFastEndpoints(path string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, nil
+	}
+	defer func() { _ = file.Close() }()
+
+	scanr := bufio.NewScanner(file)
+	for scanr.Scan() {
+		line := scanr.Text()
+		if strings.Contains(line, "FastEndpoints") {
+			return true, nil
 		}
 	}
 
@@ -424,7 +453,7 @@ func inferTags(path string) []string {
 	return []string{tagPart}
 }
 
-// ExtractSchemas extracts schema definitions from C# DTOs.
+// ExtractSchemas extracts schema definitions from C# DTOs and records.
 func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
 	var schemas []types.Schema
 
@@ -435,19 +464,30 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 
 		pf := p.csParser.Parse(file.Path, file.Content)
 
+		// Extract schemas from records (e.g., record User(int Id, string Name))
+		for _, record := range pf.Records {
+			schema := p.recordToSchema(record)
+			if schema != nil {
+				schemas = append(schemas, *schema)
+			}
+		}
+
+		// Extract schemas from classes with properties
 		for _, class := range pf.Classes {
 			// Skip controllers
 			if p.isController(class) {
 				continue
 			}
 
-			// Check if this looks like a DTO
-			if strings.HasSuffix(class.Name, "Dto") ||
+			// Include classes with properties or common DTO naming patterns
+			hasProperties := len(class.Properties) > 0
+			isNamedAsDTO := strings.HasSuffix(class.Name, "Dto") ||
 				strings.HasSuffix(class.Name, "DTO") ||
 				strings.HasSuffix(class.Name, "Request") ||
 				strings.HasSuffix(class.Name, "Response") ||
-				strings.HasSuffix(class.Name, "Model") {
+				strings.HasSuffix(class.Name, "Model")
 
+			if hasProperties || isNamedAsDTO {
 				schema := p.classToSchema(class)
 				if schema != nil {
 					schemas = append(schemas, *schema)
@@ -459,6 +499,45 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 	return schemas, nil
 }
 
+// recordToSchema converts a C# record to an OpenAPI schema.
+func (p *Plugin) recordToSchema(record parser.CSharpClass) *types.Schema {
+	schema := &types.Schema{
+		Title:      record.Name,
+		Type:       "object",
+		Properties: make(map[string]*types.Schema),
+		Required:   []string{},
+	}
+
+	// Convert record properties to schema properties
+	for _, prop := range record.Properties {
+		propName := util.ToLowerCamelCase(prop.Name)
+		openAPIType, format := parser.CSharpTypeToOpenAPI(prop.Type)
+
+		propSchema := &types.Schema{
+			Type:   openAPIType,
+			Format: format,
+		}
+
+		// Handle array types
+		if openAPIType == "array" {
+			innerType := util.ExtractInnerType(prop.Type)
+			itemType, itemFormat := parser.CSharpTypeToOpenAPI(innerType)
+			propSchema.Items = &types.Schema{
+				Type:   itemType,
+				Format: itemFormat,
+			}
+		}
+
+		schema.Properties[propName] = propSchema
+
+		if prop.IsRequired {
+			schema.Required = append(schema.Required, propName)
+		}
+	}
+
+	return schema
+}
+
 // classToSchema converts a C# class to an OpenAPI schema.
 func (p *Plugin) classToSchema(class parser.CSharpClass) *types.Schema {
 	schema := &types.Schema{
@@ -468,19 +547,47 @@ func (p *Plugin) classToSchema(class parser.CSharpClass) *types.Schema {
 		Required:   []string{},
 	}
 
-	// Extract properties from methods that look like getters
-	// In a real implementation, we'd parse properties directly
-	for _, method := range class.Methods {
-		if strings.HasPrefix(method.Name, "get_") {
-			propName := strings.TrimPrefix(method.Name, "get_")
-			openAPIType, format := parser.CSharpTypeToOpenAPI(method.ReturnType)
+	// Extract properties from class properties
+	for _, prop := range class.Properties {
+		propName := util.ToLowerCamelCase(prop.Name)
+		openAPIType, format := parser.CSharpTypeToOpenAPI(prop.Type)
 
-			propSchema := &types.Schema{
-				Type:   openAPIType,
-				Format: format,
+		propSchema := &types.Schema{
+			Type:   openAPIType,
+			Format: format,
+		}
+
+		// Handle array types
+		if openAPIType == "array" {
+			innerType := util.ExtractInnerType(prop.Type)
+			itemType, itemFormat := parser.CSharpTypeToOpenAPI(innerType)
+			propSchema.Items = &types.Schema{
+				Type:   itemType,
+				Format: itemFormat,
 			}
+		}
 
-			schema.Properties[propName] = propSchema
+		schema.Properties[propName] = propSchema
+
+		if prop.IsRequired {
+			schema.Required = append(schema.Required, propName)
+		}
+	}
+
+	// Fallback: Extract properties from methods that look like getters
+	if len(schema.Properties) == 0 {
+		for _, method := range class.Methods {
+			if strings.HasPrefix(method.Name, "get_") {
+				propName := util.ToLowerCamelCase(strings.TrimPrefix(method.Name, "get_"))
+				openAPIType, format := parser.CSharpTypeToOpenAPI(method.ReturnType)
+
+				propSchema := &types.Schema{
+					Type:   openAPIType,
+					Format: format,
+				}
+
+				schema.Properties[propName] = propSchema
+			}
 		}
 	}
 

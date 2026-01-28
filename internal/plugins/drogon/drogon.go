@@ -101,6 +101,7 @@ func (p *Plugin) checkFileForDependency(path, dep string) (bool, error) {
 // ExtractRoutes parses source files and extracts Drogon route definitions.
 func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error) {
 	var routes []types.Route
+	seen := make(map[string]bool)
 
 	for _, file := range files {
 		if file.Language != "cpp" {
@@ -112,6 +113,14 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 		for _, route := range pf.Routes {
 			r := p.convertRoute(route, file.Path)
 			if r != nil {
+				// Deduplicate routes by method+path
+				// This prevents double-counting when routes are defined in both
+				// main source files and test files
+				key := r.Method + " " + r.Path
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
 				routes = append(routes, *r)
 			}
 		}

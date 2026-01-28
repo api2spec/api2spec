@@ -159,6 +159,19 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) []types.Route {
 				continue
 			}
 
+			// Skip common non-route variable names (test code, internal objects)
+			skipVars := map[string]bool{
+				"this":     true, // PHPUnit test methods like $this->get()
+				"response": true,
+				"request":  true,
+				"client":   true,
+				"http":     true,
+				"browser":  true,
+			}
+			if skipVars[varName] {
+				continue
+			}
+
 			// Use the group prefix if we can find it
 			prefix := p.findPrefixForVariable(varName, groupPrefixes)
 

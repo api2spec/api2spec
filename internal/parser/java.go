@@ -37,6 +37,36 @@ type JavaClass struct {
 	// Methods are the class methods
 	Methods []JavaMethod
 
+	// Fields are the class fields
+	Fields []JavaField
+
+	// IsRecord indicates if this is a Java record
+	IsRecord bool
+
+	// RecordComponents are the record's component fields (for records only)
+	RecordComponents []JavaField
+
+	// Line is the source line number
+	Line int
+}
+
+// JavaField represents a Java field definition.
+type JavaField struct {
+	// Name is the field name
+	Name string
+
+	// Type is the field type
+	Type string
+
+	// Annotations are the field annotations
+	Annotations []JavaAnnotation
+
+	// Visibility is the field visibility (public, private, protected)
+	Visibility string
+
+	// IsFinal indicates if the field is final
+	IsFinal bool
+
 	// Line is the source line number
 	Line int
 }
@@ -121,8 +151,15 @@ var (
 	// Matches class definitions with annotations
 	javaClassRegex = regexp.MustCompile(`(?ms)((?:@\w+(?:\s*\([^)]*\))?\s*)*)\s*(public|private|protected)?\s*(abstract|final)?\s*class\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([^{]+))?`)
 
+	// Matches record definitions with annotations (Java 14+)
+	// Format: public record Name(Type1 field1, Type2 field2) {}
+	javaRecordRegex = regexp.MustCompile(`(?ms)((?:@\w+(?:\s*\([^)]*\))?\s*)*)\s*(public|private|protected)?\s*record\s+(\w+)\s*\(([^)]*)\)(?:\s+implements\s+([^{]+))?`)
+
 	// Matches method definitions with annotations
 	javaMethodRegex = regexp.MustCompile(`(?ms)((?:@\w+(?:\s*\([^)]*\))?\s*)*)\s*(public|private|protected)?\s*(?:static\s+)?(?:final\s+)?([\w<>,\s\[\]?]+)\s+(\w+)\s*\(([^)]*)\)`)
+
+	// Matches field definitions
+	javaFieldRegex = regexp.MustCompile(`(?m)((?:@\w+(?:\s*\([^)]*\))?\s*)*)\s*(public|private|protected)?\s*(static\s+)?(final\s+)?([\w<>,\s\[\]?]+)\s+(\w+)\s*(?:=\s*[^;]+)?;`)
 )
 
 // Parse parses Java source code.
@@ -145,6 +182,10 @@ func (p *JavaParser) Parse(filename string, content []byte) *ParsedJavaFile {
 
 	// Extract classes
 	pf.Classes = p.extractClasses(src)
+
+	// Extract records and append to classes
+	records := p.extractRecords(src)
+	pf.Classes = append(pf.Classes, records...)
 
 	return pf
 }
@@ -221,6 +262,123 @@ func (p *JavaParser) extractClasses(src string) []JavaClass {
 	}
 
 	return classes
+}
+
+// extractRecords extracts Java record definitions from source.
+func (p *JavaParser) extractRecords(src string) []JavaClass {
+	var records []JavaClass
+
+	matches := javaRecordRegex.FindAllStringSubmatchIndex(src, -1)
+	for _, match := range matches {
+		if len(match) < 12 {
+			continue
+		}
+
+		line := countLines(src[:match[0]])
+
+		record := JavaClass{
+			Line:             line,
+			IsRecord:         true,
+			Annotations:      []JavaAnnotation{},
+			Implements:       []string{},
+			Methods:          []JavaMethod{},
+			Fields:           []JavaField{},
+			RecordComponents: []JavaField{},
+		}
+
+		// Extract annotations (group 1)
+		if match[2] >= 0 && match[3] >= 0 {
+			annoStr := src[match[2]:match[3]]
+			record.Annotations = p.extractAnnotations(annoStr)
+		}
+
+		// Extract record name (group 3)
+		if match[6] >= 0 && match[7] >= 0 {
+			record.Name = src[match[6]:match[7]]
+		}
+
+		// Extract record components (group 4) - these are the fields
+		if match[8] >= 0 && match[9] >= 0 {
+			componentStr := src[match[8]:match[9]]
+			record.RecordComponents = p.extractRecordComponents(componentStr)
+			// Also populate Fields for compatibility
+			record.Fields = record.RecordComponents
+		}
+
+		// Extract implemented interfaces (group 5)
+		if match[10] >= 0 && match[11] >= 0 {
+			implStr := src[match[10]:match[11]]
+			impls := strings.Split(implStr, ",")
+			for _, impl := range impls {
+				impl = strings.TrimSpace(impl)
+				if impl != "" {
+					record.Implements = append(record.Implements, impl)
+				}
+			}
+		}
+
+		if record.Name != "" {
+			records = append(records, record)
+		}
+	}
+
+	return records
+}
+
+// extractRecordComponents extracts field definitions from a record's component list.
+func (p *JavaParser) extractRecordComponents(src string) []JavaField {
+	var fields []JavaField
+
+	// Split by comma, handling generics
+	components := splitJavaParameters(src)
+
+	for _, comp := range components {
+		comp = strings.TrimSpace(comp)
+		if comp == "" {
+			continue
+		}
+
+		field := JavaField{
+			Annotations: []JavaAnnotation{},
+			Visibility:  "public", // Record components are implicitly public
+			IsFinal:     true,     // Record components are implicitly final
+		}
+
+		// Check for annotations
+		annoMatches := javaAnnotationRegex.FindAllStringSubmatch(comp, -1)
+		for _, m := range annoMatches {
+			if len(m) >= 2 {
+				anno := JavaAnnotation{
+					Name:       m[1],
+					Attributes: make(map[string]string),
+				}
+				if len(m) > 2 && m[2] != "" {
+					anno.Value = strings.Trim(m[2], `"`)
+				}
+				field.Annotations = append(field.Annotations, anno)
+			}
+		}
+
+		// Remove annotations from component string
+		cleanComp := javaAnnotationRegex.ReplaceAllString(comp, "")
+		cleanComp = strings.TrimSpace(cleanComp)
+
+		// Split into type and name
+		parts := strings.Fields(cleanComp)
+		if len(parts) >= 2 {
+			field.Type = strings.Join(parts[:len(parts)-1], " ")
+			field.Name = parts[len(parts)-1]
+		} else if len(parts) == 1 {
+			// Edge case: only name provided
+			field.Name = parts[0]
+		}
+
+		if field.Name != "" {
+			fields = append(fields, field)
+		}
+	}
+
+	return fields
 }
 
 // findClassBody finds the body of a class (between { and }).

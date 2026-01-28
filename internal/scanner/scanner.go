@@ -42,7 +42,12 @@ func New(config Config) *Scanner {
 		config.BasePath = "."
 	}
 	if len(config.IncludePatterns) == 0 {
-		config.IncludePatterns = []string{"**/*.go", "**/*.ts", "**/*.js"}
+		// Build default patterns from all supported extensions
+		exts := SupportedExtensions()
+		config.IncludePatterns = make([]string, len(exts))
+		for i, ext := range exts {
+			config.IncludePatterns[i] = "**/*" + ext
+		}
 	}
 
 	return &Scanner{

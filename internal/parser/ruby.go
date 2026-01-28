@@ -147,7 +147,8 @@ var (
 
 	// Matches Rails route definitions
 	// get '/path', to: 'controller#action'
-	rubyRouteToRegex = regexp.MustCompile(`(?m)^\s*(get|post|put|patch|delete|options|head)\s+['"]([^'"]+)['"](?:\s*,\s*to:\s*['"](\w+)#(\w+)['"])?`)
+	// Note: The 'to:' clause is required to distinguish from Sinatra routes or test helper calls
+	rubyRouteToRegex = regexp.MustCompile(`(?m)^\s*(get|post|put|patch|delete|options|head)\s+['"]([^'"]+)['"]\s*,\s*to:\s*['"](\w+)#(\w+)['"]`)
 
 	// Matches Rails route definitions with controller array
 	// get '/path', [Controller, :action]

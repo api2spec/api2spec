@@ -175,6 +175,23 @@ type UpdateItem = "items" :> Capture "id" Int :> ReqBody '[JSON] UpdateItem :> P
 type CreateWithPlainText = "text" :> ReqBody '[PlainText] Text :> Post '[PlainText] Text
 `
 
+// servantNestedParenAPICode tests APIs with shared prefixes using parentheses.
+const servantNestedParenAPICode = `
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
+
+module NestedParen where
+
+import Servant
+
+type UsersAPI = "users" :>
+  (    Get '[JSON] [User]
+  :<|> Capture "id" Int :> Get '[JSON] User
+  :<|> ReqBody '[JSON] CreateUser :> PostCreated '[JSON] User
+  :<|> Capture "id" Int :> DeleteNoContent
+  )
+`
+
 func TestPlugin_Name(t *testing.T) {
 	p := New()
 	assert.Equal(t, "servant", p.Name())
@@ -467,6 +484,72 @@ func TestPlugin_ExtractRoutes_NestedPaths(t *testing.T) {
 		pathParams := filterParamsByIn(commentsRoute.Parameters, "path")
 		assert.Len(t, pathParams, 2)
 	}
+}
+
+func TestPlugin_ExtractRoutes_CombinedAPIs(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "src/Combined.hs",
+			Language: "haskell",
+			Content:  []byte(servantCombinedAPICode),
+		},
+	}
+
+	routes, err := p.ExtractRoutes(files)
+	require.NoError(t, err)
+
+	// Should extract 5 routes from the combined APIs (UserAPI: 3, ProductAPI: 2)
+	assert.GreaterOrEqual(t, len(routes), 5)
+
+	// Check UserAPI routes
+	getUsersRoute := findRoute(routes, "GET", "/users")
+	assert.NotNil(t, getUsersRoute, "Expected GET /users route")
+
+	getUserRoute := findRoute(routes, "GET", "/users/{id}")
+	assert.NotNil(t, getUserRoute, "Expected GET /users/{id} route")
+
+	postUserRoute := findRoute(routes, "POST", "/users")
+	assert.NotNil(t, postUserRoute, "Expected POST /users route")
+
+	// Check ProductAPI routes
+	getProductsRoute := findRoute(routes, "GET", "/products")
+	assert.NotNil(t, getProductsRoute, "Expected GET /products route")
+
+	getProductRoute := findRoute(routes, "GET", "/products/{id}")
+	assert.NotNil(t, getProductRoute, "Expected GET /products/{id} route")
+}
+
+func TestPlugin_ExtractRoutes_NestedParenAPIs(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "src/NestedParen.hs",
+			Language: "haskell",
+			Content:  []byte(servantNestedParenAPICode),
+		},
+	}
+
+	routes, err := p.ExtractRoutes(files)
+	require.NoError(t, err)
+
+	// Should extract 4 routes from the nested parentheses API
+	assert.GreaterOrEqual(t, len(routes), 4)
+
+	// All routes should have the shared /users prefix
+	getUsersRoute := findRoute(routes, "GET", "/users")
+	assert.NotNil(t, getUsersRoute, "Expected GET /users route")
+
+	getUserRoute := findRoute(routes, "GET", "/users/{id}")
+	assert.NotNil(t, getUserRoute, "Expected GET /users/{id} route")
+
+	postUserRoute := findRoute(routes, "POST", "/users")
+	assert.NotNil(t, postUserRoute, "Expected POST /users route")
+
+	deleteUserRoute := findRoute(routes, "DELETE", "/users/{id}")
+	assert.NotNil(t, deleteUserRoute, "Expected DELETE /users/{id} route")
 }
 
 func TestPlugin_ExtractRoutes_IgnoresNonHaskell(t *testing.T) {

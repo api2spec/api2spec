@@ -108,9 +108,29 @@ func (p *Plugin) checkFileForDependency(path, dep string) (bool, error) {
 func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error) {
 	var routes []types.Route
 
+	// Try to find and read conf/routes directly from project root
+	// Derive project root from the first scanned file's path
+	if len(files) > 0 {
+		routesFile := p.findAndReadRoutesFile(files[0].Path)
+		if routesFile != nil {
+			pf := p.scalaParser.ParsePlayRoutes(routesFile.Path, routesFile.Content)
+			for _, route := range pf.PlayRoutes {
+				r := p.convertPlayRoute(route, routesFile.Path)
+				if r != nil {
+					routes = append(routes, *r)
+				}
+			}
+		}
+	}
+
+	// Also check any routes files that might have been passed in directly
 	for _, file := range files {
-		// Check for conf/routes file
+		// Check for conf/routes file (in case it was included)
 		if strings.HasSuffix(file.Path, "conf/routes") || strings.HasSuffix(file.Path, "/routes") {
+			// Skip if we already processed this file
+			if len(routes) > 0 {
+				continue
+			}
 			pf := p.scalaParser.ParsePlayRoutes(file.Path, file.Content)
 			for _, route := range pf.PlayRoutes {
 				r := p.convertPlayRoute(route, file.Path)
@@ -119,15 +139,36 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 				}
 			}
 		}
-
-		// Also check for Scala controller files
-		if file.Language == "scala" {
-			// We could extract routes from Action definitions here
-			// but Play primarily uses the conf/routes file
-		}
 	}
 
 	return routes, nil
+}
+
+// findAndReadRoutesFile finds the conf/routes file from a source file path.
+func (p *Plugin) findAndReadRoutesFile(sourcePath string) *scanner.SourceFile {
+	// Try to find project root by looking for common Play markers
+	dir := filepath.Dir(sourcePath)
+
+	// Walk up the directory tree to find project root
+	for i := 0; i < 10; i++ { // Limit depth to avoid infinite loop
+		routesPath := filepath.Join(dir, "conf", "routes")
+		if content, err := os.ReadFile(routesPath); err == nil {
+			return &scanner.SourceFile{
+				Path:     routesPath,
+				Language: "routes",
+				Content:  content,
+			}
+		}
+
+		// Check if we're at filesystem root
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return nil
 }
 
 // convertPlayRoute converts a parsed Play route to a types.Route.

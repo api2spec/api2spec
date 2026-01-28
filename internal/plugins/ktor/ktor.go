@@ -102,19 +102,9 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 			continue
 		}
 
-		pf := p.kotlinParser.Parse(file.Path, file.Content)
-
-		// Extract routes from parsed routes
-		for _, route := range pf.Routes {
-			r := p.convertRoute(route, file.Path)
-			if r != nil {
-				routes = append(routes, *r)
-			}
-		}
-
-		// Also extract routes from raw content using regex
-		rawRoutes := p.extractRoutesFromContent(string(file.Content), file.Path)
-		routes = append(routes, rawRoutes...)
+		// Extract routes with proper nested route handling
+		fileRoutes := p.extractRoutesFromContent(string(file.Content), file.Path)
+		routes = append(routes, fileRoutes...)
 	}
 
 	return routes, nil
@@ -139,28 +129,90 @@ func (p *Plugin) convertRoute(route parser.KotlinRoute, filePath string) *types.
 	}
 }
 
-// extractRoutesFromContent extracts routes from raw Kotlin content.
+// extractRoutesFromContent extracts routes from Kotlin content with proper nested route handling.
+// It handles Ktor's nested routing blocks like route("/prefix") { get { } }
 func (p *Plugin) extractRoutesFromContent(content, filePath string) []types.Route {
 	var routes []types.Route
 
-	// Track route blocks for nested prefixes
-	prefixes := p.extractRoutePrefixes(content)
-	_ = prefixes // TODO: Apply nested prefixes
+	// First, find all route() blocks and their prefixes
+	routeBlocks := p.findRouteBlocks(content)
 
-	// Match routes with HTTP method calls
-	routeRegex := regexp.MustCompile(`(?m)(get|post|put|delete|patch|head|options)\s*\(\s*"([^"]+)"\s*\)\s*\{`)
-	matches := routeRegex.FindAllStringSubmatchIndex(content, -1)
+	// Match HTTP method routes with explicit paths: get("/path") {
+	// The \s*\{ at the end ensures we're matching route definitions, not client calls
+	// The negative lookbehind (?<!\.) doesn't work in Go regex, so we check context manually
+	routeWithPathRegex := regexp.MustCompile(`(get|post|put|delete|patch|head|options)\s*\(\s*"([^"]+)"\s*\)\s*\{`)
+	matches := routeWithPathRegex.FindAllStringSubmatchIndex(content, -1)
 
 	for _, match := range matches {
 		if len(match) < 6 {
 			continue
 		}
 
-		line := countLines(content[:match[0]])
+		pos := match[0]
+
+		// Skip if preceded by a dot (e.g., client.get) - this filters out test client calls
+		if pos > 0 && content[pos-1] == '.' {
+			continue
+		}
+
+		line := countLines(content[:pos])
 		method := strings.ToUpper(content[match[2]:match[3]])
 		path := content[match[4]:match[5]]
 
-		fullPath := convertKtorPathParams(path)
+		// Find the containing route block prefix
+		prefix := p.findContainingRoutePrefix(routeBlocks, pos)
+		fullPath := prefix + path
+
+		fullPath = convertKtorPathParams(fullPath)
+		params := extractPathParams(fullPath)
+		operationID := generateOperationID(method, fullPath, "")
+		tags := inferTags(fullPath)
+
+		routes = append(routes, types.Route{
+			Method:      method,
+			Path:        fullPath,
+			OperationID: operationID,
+			Tags:        tags,
+			Parameters:  params,
+			SourceFile:  filePath,
+			SourceLine:  line,
+		})
+	}
+
+	// Match HTTP method routes without paths inside route blocks: get {
+	// These inherit their path from the containing route() block
+	routeNoPathRegex := regexp.MustCompile(`(get|post|put|delete|patch|head|options)\s*\{`)
+	noPathMatches := routeNoPathRegex.FindAllStringSubmatchIndex(content, -1)
+
+	for _, match := range noPathMatches {
+		if len(match) < 4 {
+			continue
+		}
+
+		pos := match[0]
+
+		// Skip if preceded by a dot (e.g., client.get)
+		if pos > 0 && content[pos-1] == '.' {
+			continue
+		}
+
+		// Skip if this looks like a route with a path (already handled above)
+		// Check if there's a ( before the {
+		beforeBrace := content[match[0]:match[1]]
+		if strings.Contains(beforeBrace, "(") {
+			continue
+		}
+
+		line := countLines(content[:pos])
+		method := strings.ToUpper(content[match[2]:match[3]])
+
+		// Must be inside a route block to be valid
+		prefix := p.findContainingRoutePrefix(routeBlocks, pos)
+		if prefix == "" {
+			continue // Skip - not inside a route block
+		}
+
+		fullPath := convertKtorPathParams(prefix)
 		params := extractPathParams(fullPath)
 		operationID := generateOperationID(method, fullPath, "")
 		tags := inferTags(fullPath)
@@ -179,20 +231,100 @@ func (p *Plugin) extractRoutesFromContent(content, filePath string) []types.Rout
 	return routes
 }
 
-// extractRoutePrefixes extracts route block prefixes from content.
-func (p *Plugin) extractRoutePrefixes(content string) []string {
-	var prefixes []string
+// routeBlock represents a route() block with its prefix and position range.
+type routeBlock struct {
+	prefix   string
+	startPos int
+	endPos   int
+}
 
-	routeBlockRegex := regexp.MustCompile(`route\s*\(\s*"([^"]+)"\s*\)`)
-	matches := routeBlockRegex.FindAllStringSubmatch(content, -1)
+// findRouteBlocks finds all route("/prefix") { ... } blocks and their positions.
+func (p *Plugin) findRouteBlocks(content string) []routeBlock {
+	var blocks []routeBlock
+
+	// Match route("/prefix") and find the corresponding block
+	routeBlockRegex := regexp.MustCompile(`route\s*\(\s*"([^"]+)"\s*\)\s*\{`)
+	matches := routeBlockRegex.FindAllStringSubmatchIndex(content, -1)
 
 	for _, match := range matches {
-		if len(match) >= 2 {
-			prefixes = append(prefixes, match[1])
+		if len(match) < 4 {
+			continue
+		}
+
+		prefix := content[match[2]:match[3]]
+		blockStart := match[0]
+
+		// Find the opening brace position
+		braceStart := strings.Index(content[match[0]:], "{")
+		if braceStart == -1 {
+			continue
+		}
+		braceStart += match[0]
+
+		// Find the matching closing brace
+		blockEnd := p.findMatchingBrace(content, braceStart)
+		if blockEnd == -1 {
+			continue
+		}
+
+		blocks = append(blocks, routeBlock{
+			prefix:   prefix,
+			startPos: blockStart,
+			endPos:   blockEnd,
+		})
+	}
+
+	return blocks
+}
+
+// findMatchingBrace finds the position of the closing brace matching the opening brace at pos.
+func (p *Plugin) findMatchingBrace(content string, pos int) int {
+	if pos >= len(content) || content[pos] != '{' {
+		return -1
+	}
+
+	depth := 0
+	inString := false
+	for i := pos; i < len(content); i++ {
+		ch := content[i]
+
+		// Handle string literals
+		if ch == '"' && (i == 0 || content[i-1] != '\\') {
+			inString = !inString
+			continue
+		}
+
+		if inString {
+			continue
+		}
+
+		switch ch {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
 		}
 	}
 
-	return prefixes
+	return -1
+}
+
+// findContainingRoutePrefix finds the route prefix for a position, handling nested blocks.
+func (p *Plugin) findContainingRoutePrefix(blocks []routeBlock, pos int) string {
+	var prefix string
+
+	// Find all blocks containing this position and concatenate their prefixes
+	// (for nested route blocks)
+	for _, block := range blocks {
+		if pos > block.startPos && pos < block.endPos {
+			prefix += block.prefix
+		}
+	}
+
+	return prefix
 }
 
 // countLines counts the number of lines up to a position.

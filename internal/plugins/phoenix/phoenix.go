@@ -298,11 +298,119 @@ func inferTags(path string) []string {
 	return []string{tagPart}
 }
 
-// ExtractSchemas extracts schema definitions from Elixir structs.
-func (p *Plugin) ExtractSchemas(_ []scanner.SourceFile) ([]types.Schema, error) {
-	// Elixir doesn't have a standard schema definition pattern like Pydantic
-	// Ecto schemas could be parsed, but that's complex
-	return []types.Schema{}, nil
+// ExtractSchemas extracts schema definitions from Ecto schemas.
+func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
+	var schemas []types.Schema
+
+	for _, file := range files {
+		if file.Language != "elixir" {
+			continue
+		}
+
+		pf := p.elixirParser.Parse(file.Path, file.Content)
+
+		for _, ectoSchema := range pf.Schemas {
+			schema := p.convertEctoSchema(ectoSchema)
+			if schema != nil {
+				schemas = append(schemas, *schema)
+			}
+		}
+	}
+
+	return schemas, nil
+}
+
+// convertEctoSchema converts an Ecto schema to an OpenAPI schema.
+func (p *Plugin) convertEctoSchema(ecto parser.EctoSchema) *types.Schema {
+	if len(ecto.Fields) == 0 {
+		return nil
+	}
+
+	// Extract schema name from module name (e.g., "App.Schemas.User" -> "User")
+	schemaName := ecto.ModuleName
+	if parts := strings.Split(ecto.ModuleName, "."); len(parts) > 0 {
+		schemaName = parts[len(parts)-1]
+	}
+
+	properties := make(map[string]*types.Schema)
+	var required []string
+
+	for _, field := range ecto.Fields {
+		propSchema := p.ectoTypeToJSONSchema(field.Type)
+
+		// Set default value if present
+		if field.HasDefault && field.Default != "" {
+			propSchema.Default = p.parseEctoDefault(field.Default, field.Type)
+		}
+
+		properties[field.Name] = propSchema
+
+		// Fields without defaults are considered required
+		if !field.HasDefault {
+			required = append(required, field.Name)
+		}
+	}
+
+	return &types.Schema{
+		Type:       "object",
+		Title:      schemaName,
+		Properties: properties,
+		Required:   required,
+	}
+}
+
+// ectoTypeToJSONSchema converts an Ecto type to a JSON Schema type.
+func (p *Plugin) ectoTypeToJSONSchema(ectoType string) *types.Schema {
+	switch ectoType {
+	case "string":
+		return &types.Schema{Type: "string"}
+	case "integer", "id":
+		return &types.Schema{Type: "integer"}
+	case "float", "decimal":
+		return &types.Schema{Type: "number"}
+	case "boolean":
+		return &types.Schema{Type: "boolean"}
+	case "date":
+		return &types.Schema{Type: "string", Format: "date"}
+	case "time":
+		return &types.Schema{Type: "string", Format: "time"}
+	case "datetime", "utc_datetime", "naive_datetime":
+		return &types.Schema{Type: "string", Format: "date-time"}
+	case "uuid", "binary_id":
+		return &types.Schema{Type: "string", Format: "uuid"}
+	case "map":
+		return &types.Schema{Type: "object"}
+	case "array":
+		return &types.Schema{Type: "array", Items: &types.Schema{Type: "string"}}
+	default:
+		// Unknown type, default to string
+		return &types.Schema{Type: "string"}
+	}
+}
+
+// parseEctoDefault parses an Ecto default value.
+func (p *Plugin) parseEctoDefault(defaultVal, ectoType string) interface{} {
+	defaultVal = strings.TrimSpace(defaultVal)
+
+	switch ectoType {
+	case "boolean":
+		return defaultVal == "true"
+	case "integer", "id":
+		// Try to parse as integer
+		if defaultVal == "0" {
+			return 0
+		}
+		return defaultVal
+	case "float", "decimal":
+		if defaultVal == "0" || defaultVal == "0.0" {
+			return 0.0
+		}
+		return defaultVal
+	default:
+		// Return as string, removing quotes if present
+		defaultVal = strings.Trim(defaultVal, "\"'")
+		return defaultVal
+	}
 }
 
 // Register registers the Phoenix plugin with the global registry.

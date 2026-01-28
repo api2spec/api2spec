@@ -230,6 +230,7 @@ var supportedFrameworks = []string{
 	"phoenix",
 	// .NET
 	"aspnet",
+	"fastendpoints",
 	// Gleam
 	"gleam",
 }
@@ -297,7 +298,7 @@ func Default() *Config {
 		},
 		Source: SourceConfig{
 			Paths:   []string{"."},
-			Include: []string{"**/*.go", "**/*.ts", "**/*.js", "**/*.py", "**/*.rs", "**/*.java", "**/*.kt", "**/*.rb", "**/*.php", "**/*.ex", "**/*.exs", "**/*.cs", "**/*.gleam"},
+			Include: []string{"**/*.go", "**/*.ts", "**/*.js", "**/*.py", "**/*.rs", "**/*.java", "**/*.kt", "**/*.rb", "**/*.php", "**/*.ex", "**/*.exs", "**/*.cs", "**/*.gleam", "**/*.cpp", "**/*.hpp", "**/*.h", "**/*.cc", "**/*.cxx", "**/*.scala", "**/*.swift", "**/*.hs", "**/*.yaml", "**/*.yml"},
 			Exclude: []string{
 				"vendor/**",
 				"**/*_test.go",
@@ -305,7 +306,9 @@ func Default() *Config {
 				"node_modules/**",
 				".git/**",
 				"dist/**",
+				"dist-newstyle/**", // Haskell (Cabal) build artifacts
 				"build/**",
+				".build/**", // Swift Package Manager build artifacts
 				"target/**",
 				"**/*.pb.go",
 				"**/mock*.go",
@@ -394,7 +397,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("openapi.info.title", "API")
 	v.SetDefault("openapi.info.version", "1.0.0")
 	v.SetDefault("source.paths", []string{"."})
-	v.SetDefault("source.include", []string{"**/*.go", "**/*.ts", "**/*.js", "**/*.py", "**/*.rs", "**/*.java", "**/*.kt", "**/*.rb", "**/*.php", "**/*.ex", "**/*.exs", "**/*.cs", "**/*.gleam"})
+	v.SetDefault("source.include", []string{"**/*.go", "**/*.ts", "**/*.js", "**/*.py", "**/*.rs", "**/*.java", "**/*.kt", "**/*.rb", "**/*.php", "**/*.ex", "**/*.exs", "**/*.cs", "**/*.gleam", "**/*.cpp", "**/*.hpp", "**/*.h", "**/*.cc", "**/*.cxx", "**/*.scala", "**/*.swift", "**/*.hs", "**/*.yaml", "**/*.yml"})
 	v.SetDefault("source.exclude", []string{
 		"vendor/**",
 		"**/*_test.go",
@@ -402,7 +405,9 @@ func setDefaults(v *viper.Viper) {
 		"node_modules/**",
 		".git/**",
 		"dist/**",
+		"dist-newstyle/**", // Haskell (Cabal) build artifacts
 		"build/**",
+		".build/**", // Swift Package Manager build artifacts
 		"target/**",
 		"**/*.pb.go",
 		"**/mock*.go",

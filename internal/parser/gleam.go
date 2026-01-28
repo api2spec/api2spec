@@ -502,33 +502,38 @@ func (p *GleamParser) extractRoutes(src string) []GleamRoute {
 func (p *GleamParser) extractPathSegmentsRoutes(src string) []GleamRoute {
 	var routes []GleamRoute
 
-	// Look for case expressions on path_segments
-	caseRegex := regexp.MustCompile(`(?ms)case\s+wisp\.path_segments\(request\)\s*\{([^}]+)\}`)
-	caseMatches := caseRegex.FindAllStringSubmatch(src, -1)
+	// Find case expressions on path_segments using balanced brace matching
+	caseBody := p.findPathSegmentsCaseBody(src)
+	if caseBody == "" {
+		return routes
+	}
 
-	for _, caseMatch := range caseMatches {
-		if len(caseMatch) < 2 {
+	// Extract individual patterns: ["segment", var] -> handler(...)
+	patternRegex := regexp.MustCompile(`\[([^\]]*)\]\s*->\s*(\w+)`)
+	patternMatches := patternRegex.FindAllStringSubmatchIndex(caseBody, -1)
+
+	for _, match := range patternMatches {
+		if len(match) < 6 {
 			continue
 		}
 
-		caseBody := caseMatch[1]
-		line := countLines(src[:strings.Index(src, caseBody)])
+		segmentsStr := caseBody[match[2]:match[3]]
+		handler := caseBody[match[4]:match[5]]
+		line := countLines(src[:strings.Index(src, caseBody)+match[0]])
 
-		// Extract individual patterns
-		patternRegex := regexp.MustCompile(`\[([^\]]+)\]\s*->\s*(\w+)`)
-		patternMatches := patternRegex.FindAllStringSubmatch(caseBody, -1)
+		path := p.pathSegmentsToPath(segmentsStr)
 
-		for _, patternMatch := range patternMatches {
-			if len(patternMatch) < 3 {
-				continue
-			}
+		// Extract HTTP methods from the handler function body
+		methods := p.extractMethodsFromHandler(src, handler)
+		if len(methods) == 0 {
+			// Default to GET if no method case expression found
+			methods = []string{"GET"}
+		}
 
-			path := p.pathSegmentsToPath(patternMatch[1])
-			handler := patternMatch[2]
-
-			// Default to GET for now
+		// Create a route for each HTTP method
+		for _, method := range methods {
 			routes = append(routes, GleamRoute{
-				Method:  "GET",
+				Method:  method,
 				Path:    path,
 				Handler: handler,
 				Line:    line,
@@ -539,29 +544,114 @@ func (p *GleamParser) extractPathSegmentsRoutes(src string) []GleamRoute {
 	return routes
 }
 
-// pathSegmentsToPath converts a path segments list to a path string.
-func (p *GleamParser) pathSegmentsToPath(segments string) string {
-	var parts []string
+// findPathSegmentsCaseBody finds the body of a case expression on wisp.path_segments.
+func (p *GleamParser) findPathSegmentsCaseBody(src string) string {
+	// Find the start of the case expression
+	casePattern := regexp.MustCompile(`case\s+wisp\.path_segments\s*\(\s*\w+\s*\)\s*\{`)
+	loc := casePattern.FindStringIndex(src)
+	if loc == nil {
+		return ""
+	}
 
-	// Parse the segments list
-	segmentRegex := regexp.MustCompile(`"([^"]+)"`)
-	matches := segmentRegex.FindAllStringSubmatch(segments, -1)
-	for _, match := range matches {
-		if len(match) >= 2 {
-			parts = append(parts, match[1])
+	// Find the matching closing brace
+	braceStart := loc[1] - 1 // position of opening brace
+	depth := 1
+	for i := loc[1]; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[braceStart+1 : i]
+			}
 		}
 	}
 
-	// Check for variable segments
-	varRegex := regexp.MustCompile(`(\w+)`)
-	varMatches := varRegex.FindAllStringSubmatch(segments, -1)
-	for _, match := range varMatches {
-		if len(match) >= 2 {
-			name := match[1]
-			// Skip string literals already captured
-			if !strings.Contains(segments, `"`+name+`"`) && name != "" {
-				parts = append(parts, "{"+name+"}")
+	return ""
+}
+
+// extractMethodsFromHandler extracts HTTP methods from a handler function's case expression.
+func (p *GleamParser) extractMethodsFromHandler(src, handlerName string) []string {
+	var methods []string
+
+	// Find the handler function definition
+	fnPattern := regexp.MustCompile(`(?m)^fn\s+` + regexp.QuoteMeta(handlerName) + `\s*\([^)]*\)`)
+	loc := fnPattern.FindStringIndex(src)
+	if loc == nil {
+		return methods
+	}
+
+	// Find the function body by looking for the opening brace
+	bodyStart := strings.Index(src[loc[1]:], "{")
+	if bodyStart == -1 {
+		return methods
+	}
+	bodyStart += loc[1]
+
+	// Find the matching closing brace
+	depth := 1
+	bodyEnd := bodyStart + 1
+	for i := bodyStart + 1; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				bodyEnd = i
+				break
 			}
+		}
+		if depth == 0 {
+			break
+		}
+	}
+
+	fnBody := src[bodyStart:bodyEnd]
+
+	// Look for case req.method or case request.method patterns
+	methodCasePattern := regexp.MustCompile(`case\s+\w+\.method\s*\{`)
+	if !methodCasePattern.MatchString(fnBody) {
+		return methods
+	}
+
+	// Extract HTTP method patterns from case arms: http.Get -> ...
+	// Use a more specific pattern that matches the case arm syntax to avoid
+	// matching methods in wisp.method_not_allowed([http.Get, http.Post]) calls
+	methodPattern := regexp.MustCompile(`http\.(Get|Post|Put|Delete|Patch|Head|Options)\s*->`)
+	methodMatches := methodPattern.FindAllStringSubmatch(fnBody, -1)
+	for _, m := range methodMatches {
+		if len(m) >= 2 {
+			methods = append(methods, strings.ToUpper(m[1]))
+		}
+	}
+
+	return methods
+}
+
+// pathSegmentsToPath converts a path segments list to a path string.
+// Input formats: `"users"`, `"users", id`, `"users", user_id, "posts"`
+func (p *GleamParser) pathSegmentsToPath(segments string) string {
+	var parts []string
+
+	// Split by comma while respecting the structure
+	items := splitGleamParameters(segments)
+
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+
+		// Check if it's a string literal (quoted)
+		if strings.HasPrefix(item, `"`) && strings.HasSuffix(item, `"`) {
+			// Extract the string content
+			literal := item[1 : len(item)-1]
+			parts = append(parts, literal)
+		} else if isGleamIdentifier(item) {
+			// It's a variable - convert to path parameter
+			parts = append(parts, "{"+item+"}")
 		}
 	}
 
@@ -569,6 +659,27 @@ func (p *GleamParser) pathSegmentsToPath(segments string) string {
 		return "/"
 	}
 	return "/" + strings.Join(parts, "/")
+}
+
+// isGleamIdentifier checks if a string is a valid Gleam identifier (variable name).
+func isGleamIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	// Gleam identifiers start with lowercase letter or underscore
+	// and contain only alphanumeric characters and underscores
+	for i, r := range s {
+		if i == 0 {
+			if !((r >= 'a' && r <= 'z') || r == '_') {
+				return false
+			}
+		} else {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // IsSupported returns whether Gleam parsing is supported.

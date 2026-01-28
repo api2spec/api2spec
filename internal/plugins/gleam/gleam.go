@@ -126,10 +126,6 @@ func (p *Plugin) ExtractRoutes(files []scanner.SourceFile) ([]types.Route, error
 				routes = append(routes, *r)
 			}
 		}
-
-		// Also extract routes from raw content using regex patterns
-		rawRoutes := p.extractRoutesFromContent(string(file.Content), file.Path)
-		routes = append(routes, rawRoutes...)
 	}
 
 	return routes, nil
@@ -156,105 +152,6 @@ func (p *Plugin) convertRoute(route parser.GleamRoute, filePath string) *types.R
 		SourceFile:  filePath,
 		SourceLine:  route.Line,
 	}
-}
-
-// extractRoutesFromContent extracts routes from raw Gleam content.
-func (p *Plugin) extractRoutesFromContent(content, filePath string) []types.Route {
-	var routes []types.Route
-
-	// Look for case expressions matching on HTTP method
-	methodCaseRegex := regexp.MustCompile(`(?ms)case\s+request\.method\s*\{\s*([^}]+)\}`)
-	methodMatches := methodCaseRegex.FindAllStringSubmatch(content, -1)
-
-	for _, methodMatch := range methodMatches {
-		if len(methodMatch) < 2 {
-			continue
-		}
-
-		caseBody := methodMatch[1]
-		caseRoutes := p.parseMethodCaseBody(caseBody, filePath)
-		routes = append(routes, caseRoutes...)
-	}
-
-	// Look for wisp router patterns
-	routerRegex := regexp.MustCompile(`(?m)(get|post|put|delete|patch)\s*\(\s*"([^"]+)"\s*,\s*(\w+)`)
-	routerMatches := routerRegex.FindAllStringSubmatch(content, -1)
-
-	for _, match := range routerMatches {
-		if len(match) < 4 {
-			continue
-		}
-
-		method := strings.ToUpper(match[1])
-		path := match[2]
-		handler := match[3]
-
-		line := countLines(content[:strings.Index(content, match[0])])
-
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
-
-		params := extractPathParams(path)
-		operationID := generateOperationID(method, path, handler)
-		tags := inferTags(path)
-
-		routes = append(routes, types.Route{
-			Method:      method,
-			Path:        path,
-			Handler:     handler,
-			OperationID: operationID,
-			Tags:        tags,
-			Parameters:  params,
-			SourceFile:  filePath,
-			SourceLine:  line,
-		})
-	}
-
-	return routes
-}
-
-// parseMethodCaseBody parses the body of a case expression matching HTTP methods.
-func (p *Plugin) parseMethodCaseBody(body, filePath string) []types.Route {
-	var routes []types.Route
-
-	// Match patterns like: http.Get -> handle_get(request)
-	patternRegex := regexp.MustCompile(`(?m)http\.(Get|Post|Put|Delete|Patch|Head|Options)\s*->\s*(\w+)`)
-	matches := patternRegex.FindAllStringSubmatch(body, -1)
-
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-
-		method := strings.ToUpper(match[1])
-		handler := match[2]
-
-		// Default path - would need more context to get the actual path
-		path := "/"
-
-		operationID := generateOperationID(method, path, handler)
-		tags := inferTags(path)
-
-		routes = append(routes, types.Route{
-			Method:      method,
-			Path:        path,
-			Handler:     handler,
-			OperationID: operationID,
-			Tags:        tags,
-			SourceFile:  filePath,
-		})
-	}
-
-	return routes
-}
-
-// countLines counts the number of lines up to a position.
-func countLines(s string) int {
-	if s == "" {
-		return 1
-	}
-	return strings.Count(s, "\n") + 1
 }
 
 // braceParamRegex matches OpenAPI-style path parameters.

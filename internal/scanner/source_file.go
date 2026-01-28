@@ -58,6 +58,8 @@ var languageExtensions = map[string]string{
 	".swift": "swift",
 	".hs":    "haskell",
 	".lhs":   "haskell",
+	".yaml":  "yaml",
+	".yml":   "yaml",
 }
 
 // DetectLanguage detects the programming language from a file path.

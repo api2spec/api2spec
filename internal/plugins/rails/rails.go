@@ -16,6 +16,7 @@ import (
 
 	"github.com/api2spec/api2spec/internal/parser"
 	"github.com/api2spec/api2spec/internal/plugins"
+	"github.com/api2spec/api2spec/internal/plugins/ruby"
 	"github.com/api2spec/api2spec/internal/scanner"
 	"github.com/api2spec/api2spec/pkg/types"
 )
@@ -191,8 +192,6 @@ func (p *Plugin) convertRoute(route parser.RubyRoute, prefix, filePath string) *
 // railsParamRegex matches Rails path parameters like :param.
 var railsParamRegex = regexp.MustCompile(`:([a-zA-Z_][a-zA-Z0-9_]*)`)
 
-// braceParamRegex matches OpenAPI-style path parameters.
-var braceParamRegex = regexp.MustCompile(`\{([^}]+)\}`)
 
 // convertRailsPathParams converts Rails-style path params (:id) to OpenAPI format ({id}).
 func convertRailsPathParams(path string) string {
@@ -203,7 +202,7 @@ func convertRailsPathParams(path string) string {
 func extractPathParams(path string) []types.Parameter {
 	var params []types.Parameter
 
-	matches := braceParamRegex.FindAllStringSubmatch(path, -1)
+	matches := ruby.BraceParamRegex.FindAllStringSubmatch(path, -1)
 	for _, match := range matches {
 		if len(match) < 2 {
 			continue
@@ -251,7 +250,7 @@ func generateOperationID(method, path, handler string) string {
 		return strings.ToLower(method) + toTitleCase(handler)
 	}
 
-	cleanPath := braceParamRegex.ReplaceAllString(path, "By${1}")
+	cleanPath := ruby.BraceParamRegex.ReplaceAllString(path, "By${1}")
 	cleanPath = strings.ReplaceAll(cleanPath, "/", " ")
 	cleanPath = strings.TrimSpace(cleanPath)
 
@@ -319,10 +318,210 @@ func inferTags(path string) []string {
 }
 
 // ExtractSchemas extracts schema definitions from Ruby files.
-func (p *Plugin) ExtractSchemas(_ []scanner.SourceFile) ([]types.Schema, error) {
-	// Rails doesn't have a standard schema definition pattern
-	// ActiveRecord models could be parsed, but that's complex
-	return []types.Schema{}, nil
+// For Rails, we extract schemas from:
+// - render json: calls with inline hash structures
+// - params.permit() calls for request body schemas
+// - Constant hash definitions that represent data models
+func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
+	schemas := make(map[string]*types.Schema)
+
+	for _, file := range files {
+		if file.Language != "ruby" {
+			continue
+		}
+
+		content := string(file.Content)
+
+		// Extract schemas from controller files
+		if strings.Contains(file.Path, "controller") {
+			p.extractControllerSchemas(content, schemas)
+		}
+	}
+
+	// Convert map to slice
+	var result []types.Schema
+	for _, schema := range schemas {
+		result = append(result, *schema)
+	}
+
+	return result, nil
+}
+
+// extractControllerSchemas extracts schemas from Rails controller files.
+func (p *Plugin) extractControllerSchemas(content string, schemas map[string]*types.Schema) {
+	// Extract schemas from render json: calls
+	p.extractRenderJSONSchemas(content, schemas)
+
+	// Extract schemas from params.permit() calls
+	p.extractStrongParamsSchemas(content, schemas)
+}
+
+// renderJSONRegex matches render json: with hash literals or arrays of hashes.
+var renderJSONHashRegex = regexp.MustCompile(`render\s+json:\s*\{([^}]+)\}`)
+var renderJSONArrayRegex = regexp.MustCompile(`render\s+json:\s*\[\s*\{([^}]+)\}`)
+
+// railsSkipKeys defines keys to skip when extracting hash properties in Rails context.
+var railsSkipKeys = map[string]bool{
+	"status": true,
+	"to":     true,
+}
+
+// extractRenderJSONSchemas extracts schemas from render json: calls.
+func (p *Plugin) extractRenderJSONSchemas(content string, schemas map[string]*types.Schema) {
+	// Find render json: with hash literals
+	matches := renderJSONHashRegex.FindAllStringSubmatch(content, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+
+		hashContent := match[1]
+		props := ruby.ExtractHashProperties(hashContent, railsSkipKeys)
+		if len(props) == 0 {
+			continue
+		}
+
+		// Try to infer schema name from controller context
+		schemaName := p.inferSchemaName(content, props)
+		if schemaName == "" {
+			continue
+		}
+
+		if _, exists := schemas[schemaName]; !exists {
+			schemas[schemaName] = &types.Schema{
+				Title:      schemaName,
+				Type:       "object",
+				Properties: props,
+			}
+		}
+	}
+
+	// Find render json: with arrays of hashes
+	arrayMatches := renderJSONArrayRegex.FindAllStringSubmatch(content, -1)
+	for _, match := range arrayMatches {
+		if len(match) < 2 {
+			continue
+		}
+
+		hashContent := match[1]
+		props := ruby.ExtractHashProperties(hashContent, railsSkipKeys)
+		if len(props) == 0 {
+			continue
+		}
+
+		schemaName := p.inferSchemaName(content, props)
+		if schemaName == "" {
+			continue
+		}
+
+		if _, exists := schemas[schemaName]; !exists {
+			schemas[schemaName] = &types.Schema{
+				Title:      schemaName,
+				Type:       "object",
+				Properties: props,
+			}
+		}
+	}
+}
+
+// strongParamsRegex matches params.permit(:field1, :field2) calls.
+var strongParamsRegex = regexp.MustCompile(`params\.permit\(([^)]+)\)`)
+
+// extractStrongParamsSchemas extracts schemas from params.permit() calls.
+func (p *Plugin) extractStrongParamsSchemas(content string, schemas map[string]*types.Schema) {
+	matches := strongParamsRegex.FindAllStringSubmatch(content, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+
+		paramsContent := match[1]
+		props := p.extractSymbolProperties(paramsContent)
+		if len(props) == 0 {
+			continue
+		}
+
+		// Try to infer schema name from controller name
+		schemaName := p.inferRequestSchemaName(content)
+		if schemaName == "" {
+			continue
+		}
+
+		if _, exists := schemas[schemaName]; !exists {
+			schemas[schemaName] = &types.Schema{
+				Title:      schemaName,
+				Type:       "object",
+				Properties: props,
+			}
+		}
+	}
+}
+
+// symbolRegex matches Ruby symbol patterns.
+var symbolRegex = regexp.MustCompile(`:(\w+)`)
+
+// extractSymbolProperties extracts properties from params.permit(:field1, :field2).
+func (p *Plugin) extractSymbolProperties(content string) map[string]*types.Schema {
+	props := make(map[string]*types.Schema)
+
+	matches := symbolRegex.FindAllStringSubmatch(content, -1)
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		key := match[1]
+
+		// Infer type from common naming conventions
+		propSchema := ruby.InferPropertyType(key, "")
+		props[key] = propSchema
+	}
+
+	return props
+}
+
+// controllerNameRegex extracts the controller class name.
+var controllerNameRegex = regexp.MustCompile(`class\s+(\w+)Controller`)
+
+// inferSchemaName infers a schema name from controller context and properties.
+func (p *Plugin) inferSchemaName(content string, props map[string]*types.Schema) string {
+	// Try to extract from controller name
+	matches := controllerNameRegex.FindStringSubmatch(content)
+	if len(matches) >= 2 {
+		// Convert UsersController to User
+		name := matches[1]
+		// Singularize if plural
+		if strings.HasSuffix(name, "s") && !strings.HasSuffix(name, "ss") {
+			name = strings.TrimSuffix(name, "s")
+		}
+		return name
+	}
+
+	// Try to infer from common property patterns
+	if _, hasID := props["id"]; hasID {
+		if _, hasName := props["name"]; hasName {
+			return "Resource"
+		}
+		if _, hasTitle := props["title"]; hasTitle {
+			return "Item"
+		}
+	}
+
+	return ""
+}
+
+// inferRequestSchemaName infers a request schema name from controller name.
+func (p *Plugin) inferRequestSchemaName(content string) string {
+	matches := controllerNameRegex.FindStringSubmatch(content)
+	if len(matches) >= 2 {
+		name := matches[1]
+		// Singularize if plural
+		if strings.HasSuffix(name, "s") && !strings.HasSuffix(name, "ss") {
+			name = strings.TrimSuffix(name, "s")
+		}
+		return name + "Request"
+	}
+	return ""
 }
 
 // Register registers the Rails plugin with the global registry.

@@ -485,25 +485,6 @@ func TestInferTags(t *testing.T) {
 	}
 }
 
-func TestCountLines(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected int
-	}{
-		{"", 1},
-		{"hello", 1},
-		{"hello\nworld", 2},
-		{"line1\nline2\nline3", 3},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := countLines(tt.input)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 // Helper to find a route by method and path
 func findRoute(routes []types.Route, method, path string) *types.Route {
 	for i := range routes {

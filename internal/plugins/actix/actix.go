@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	sitter "github.com/smacker/go-tree-sitter"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
@@ -80,12 +81,12 @@ func (p *Plugin) checkCargoForDependency(path, dep string) (bool, error) {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	sc := bufio.NewScanner(file)
 	depLower := strings.ToLower(dep)
 	inDependencies := false
 
-	for scanner.Scan() {
-		line := strings.ToLower(scanner.Text())
+	for sc.Scan() {
+		line := strings.ToLower(sc.Text())
 
 		// Track if we're in a dependencies section
 		if strings.Contains(line, "[dependencies]") || strings.Contains(line, "[dev-dependencies]") {
@@ -151,9 +152,191 @@ func (p *Plugin) extractRoutesFromFile(file scanner.SourceFile) ([]types.Route, 
 		}
 	}
 
-	// TODO: Extract routes from web::resource() and App::route() calls
+	// Extract routes from .route() method calls (builder pattern)
+	routerRoutes := p.extractRouterRoutes(pf.RootNode, file.Content)
+	for i := range routerRoutes {
+		routerRoutes[i].SourceFile = file.Path
+		routes = append(routes, routerRoutes[i])
+	}
+
+	// Deduplicate routes (same method + path = same route)
+	routes = deduplicateRoutes(routes)
 
 	return routes, nil
+}
+
+// deduplicateRoutes removes duplicate routes based on method + path.
+func deduplicateRoutes(routes []types.Route) []types.Route {
+	seen := make(map[string]bool)
+	var result []types.Route
+
+	for _, route := range routes {
+		key := route.Method + " " + route.Path
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, route)
+		}
+	}
+
+	return result
+}
+
+// extractRouterRoutes extracts routes from .route() method calls.
+func (p *Plugin) extractRouterRoutes(rootNode *sitter.Node, content []byte) []types.Route {
+	var routes []types.Route
+
+	// Look for .route() method calls
+	p.rustParser.WalkNodes(rootNode, func(node *sitter.Node) bool {
+		if node.Type() == "call_expression" {
+			nodeRoutes := p.parseRouteCall(node, content)
+			routes = append(routes, nodeRoutes...)
+		}
+		return true
+	})
+
+	return routes
+}
+
+// parseRouteCall parses a .route() call to extract route information.
+// Pattern: .route("/path", web::get().to(handler))
+func (p *Plugin) parseRouteCall(node *sitter.Node, content []byte) []types.Route {
+	var routes []types.Route
+
+	nodeText := node.Content(content)
+
+	// Find all .route() calls in this expression
+	routeStarts := findRouteStarts(nodeText)
+
+	for _, start := range routeStarts {
+		path, methodHandlerStr := extractActixRouteArgs(nodeText[start:])
+		if path == "" {
+			continue
+		}
+
+		// Parse the method and handler from patterns like:
+		// web::get().to(handler)
+		// web::post().to(create_user)
+		methodRoutes := p.parseActixMethodHandler(path, methodHandlerStr, node)
+		routes = append(routes, methodRoutes...)
+	}
+
+	return routes
+}
+
+// findRouteStarts finds all positions where ".route(" appears.
+func findRouteStarts(text string) []int {
+	var positions []int
+	routePattern := regexp.MustCompile(`\.route\s*\(`)
+	matches := routePattern.FindAllStringIndex(text, -1)
+	for _, match := range matches {
+		positions = append(positions, match[0])
+	}
+	return positions
+}
+
+// extractActixRouteArgs extracts the path and method handler from a .route() call.
+func extractActixRouteArgs(text string) (path string, methodHandler string) {
+	// Find the opening parenthesis
+	openParen := strings.Index(text, "(")
+	if openParen == -1 {
+		return "", ""
+	}
+
+	// Find the path string (first argument)
+	pathStart := strings.Index(text[openParen:], "\"")
+	if pathStart == -1 {
+		return "", ""
+	}
+	pathStart += openParen + 1 // Move past the opening quote
+
+	pathEnd := strings.Index(text[pathStart:], "\"")
+	if pathEnd == -1 {
+		return "", ""
+	}
+
+	path = text[pathStart : pathStart+pathEnd]
+
+	// Find the comma after the path
+	commaPos := pathStart + pathEnd + 1
+	for commaPos < len(text) && text[commaPos] != ',' {
+		commaPos++
+	}
+	if commaPos >= len(text) {
+		return "", ""
+	}
+
+	// Now extract the method handler - need to balance parentheses
+	methodStart := commaPos + 1
+	// Skip whitespace
+	for methodStart < len(text) && (text[methodStart] == ' ' || text[methodStart] == '\t' || text[methodStart] == '\n') {
+		methodStart++
+	}
+
+	// Find the matching closing parenthesis
+	depth := 1 // We're inside the .route() call
+	pos := methodStart
+	for pos < len(text) && depth > 0 {
+		if text[pos] == '(' {
+			depth++
+		} else if text[pos] == ')' {
+			depth--
+		}
+		pos++
+	}
+
+	if depth == 0 {
+		methodHandler = strings.TrimSpace(text[methodStart : pos-1])
+	}
+
+	return path, methodHandler
+}
+
+// parseActixMethodHandler parses actix-web method handlers like web::get().to(handler).
+func (p *Plugin) parseActixMethodHandler(path, methodHandlerStr string, node *sitter.Node) []types.Route {
+	var routes []types.Route
+
+	// Normalize path
+	fullPath := normalizePath(path)
+	params := extractPathParams(fullPath)
+	tags := inferTags(fullPath)
+	line := int(node.StartPoint().Row) + 1
+
+	// Match patterns like:
+	// web::get().to(handler)
+	// web::post().to(create_user)
+	// Also handle without web:: prefix: get().to(handler)
+	methodRegex := regexp.MustCompile(`(?:web::)?(get|post|put|delete|patch|head|options|trace)\s*\(\s*\)\s*\.to\s*\(\s*([^)]+)\)`)
+	matches := methodRegex.FindAllStringSubmatch(methodHandlerStr, -1)
+
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+
+		methodName := strings.ToLower(match[1])
+		handlerName := strings.TrimSpace(match[2])
+
+		httpMethod, ok := httpMethods[methodName]
+		if !ok {
+			continue
+		}
+
+		operationID := generateOperationID(httpMethod, fullPath, handlerName)
+
+		route := types.Route{
+			Method:      httpMethod,
+			Path:        fullPath,
+			Handler:     handlerName,
+			OperationID: operationID,
+			Tags:        tags,
+			Parameters:  params,
+			SourceLine:  line,
+		}
+
+		routes = append(routes, route)
+	}
+
+	return routes
 }
 
 // hasActixImport checks if the file imports Actix-web.

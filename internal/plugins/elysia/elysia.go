@@ -726,8 +726,10 @@ func (p *Plugin) walkNodes(node *sitter.Node, fn func(*sitter.Node) bool) {
 	}
 }
 
-// ExtractSchemas extracts schema definitions from Zod schemas in TypeScript files.
+// ExtractSchemas extracts schema definitions from TypeScript interfaces and TypeBox schemas.
 func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
+	tsExtractor := schema.NewTypeScriptSchemaExtractor()
+
 	for _, file := range files {
 		if file.Language != "typescript" && file.Language != "javascript" {
 			continue
@@ -738,15 +740,123 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 			continue
 		}
 
-		// Extract and register Zod schemas
+		// Extract TypeScript interfaces
+		for _, iface := range pf.Interfaces {
+			tsExtractor.ExtractAndRegister(iface)
+		}
+
+		// Extract Zod schemas (if any)
 		for _, zs := range pf.ZodSchemas {
 			p.zodParser.ExtractAndRegister(zs.Name, zs.Node, file.Content)
 		}
 
+		// Extract TypeBox schemas from route definitions
+		p.extractTypeBoxSchemas(pf.RootNode, file.Content, tsExtractor.Registry())
+
 		pf.Close()
 	}
 
-	return p.zodParser.Registry().ToSlice(), nil
+	// Merge Zod schemas into the registry
+	tsExtractor.Registry().Merge(p.zodParser.Registry())
+
+	return tsExtractor.Registry().ToSlice(), nil
+}
+
+// extractTypeBoxSchemas finds and extracts TypeBox t.Object schemas from the AST.
+func (p *Plugin) extractTypeBoxSchemas(rootNode *sitter.Node, content []byte, registry *schema.Registry) {
+	schemaCounter := 0
+
+	p.walkNodes(rootNode, func(node *sitter.Node) bool {
+		if node.Type() == "call_expression" {
+			calleeText := p.tsParser.GetCalleeText(node, content)
+
+			// Check for t.Object patterns
+			if strings.HasPrefix(calleeText, "t.Object") {
+				schemaCounter++
+				schemaName := fmt.Sprintf("TypeBoxSchema%d", schemaCounter)
+
+				// Try to get a better name from the context
+				parent := node.Parent()
+				if parent != nil {
+					// Check if this is a body schema in a route
+					grandparent := parent.Parent()
+					if grandparent != nil && grandparent.Type() == "pair" {
+						for i := 0; i < int(grandparent.ChildCount()); i++ {
+							child := grandparent.Child(i)
+							if child.Type() == "property_identifier" {
+								propName := child.Content(content)
+								if propName == "body" {
+									// Try to find the route path
+									routePath := p.findRoutePathContext(grandparent, content)
+									if routePath != "" {
+										schemaName = p.generateSchemaNameFromPath(routePath, "Body")
+									}
+								}
+							}
+						}
+					}
+				}
+
+				typeBoxSchema := p.parseTypeBoxSchema(node, content)
+				if typeBoxSchema != nil && typeBoxSchema.Type == "object" && len(typeBoxSchema.Properties) > 0 {
+					typeBoxSchema.Title = schemaName
+					registry.Add(schemaName, typeBoxSchema)
+				}
+			}
+		}
+		return true
+	})
+}
+
+// findRoutePathContext tries to find the route path from the context of a schema.
+func (p *Plugin) findRoutePathContext(node *sitter.Node, content []byte) string {
+	// Walk up to find the call_expression that is a route definition
+	current := node
+	for current != nil {
+		if current.Type() == "call_expression" {
+			callee := current.Child(0)
+			if callee != nil && callee.Type() == "member_expression" {
+				_, method := p.tsParser.GetMemberExpressionParts(callee, content)
+				if _, isHTTP := httpMethods[strings.ToLower(method)]; isHTTP {
+					args := p.tsParser.GetCallArguments(current, content)
+					if len(args) > 0 && (args[0].Type() == "string" || args[0].Type() == "template_string") {
+						path, _ := p.tsParser.ExtractStringLiteral(args[0], content)
+						return path
+					}
+				}
+			}
+		}
+		current = current.Parent()
+	}
+	return ""
+}
+
+// generateSchemaNameFromPath generates a schema name from a route path.
+func (p *Plugin) generateSchemaNameFromPath(path, suffix string) string {
+	// Convert /users/:id to UsersIdBody
+	path = strings.TrimPrefix(path, "/")
+	parts := strings.Split(path, "/")
+
+	var nameParts []string
+	titleCaser := cases.Title(language.English)
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		// Skip path parameters
+		if strings.HasPrefix(part, ":") || strings.HasPrefix(part, "{") {
+			part = strings.TrimPrefix(part, ":")
+			part = strings.TrimPrefix(part, "{")
+			part = strings.TrimSuffix(part, "}")
+		}
+		nameParts = append(nameParts, titleCaser.String(strings.ToLower(part)))
+	}
+
+	if len(nameParts) == 0 {
+		return "Request" + suffix
+	}
+
+	return strings.Join(nameParts, "") + suffix
 }
 
 // --- Helper Functions ---

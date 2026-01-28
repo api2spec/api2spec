@@ -32,6 +32,30 @@ type CSharpClass struct {
 	// Methods are the class methods
 	Methods []CSharpMethod
 
+	// Properties are the class properties
+	Properties []CSharpProperty
+
+	// Line is the source line number
+	Line int
+
+	// IsRecord indicates if this is a record type
+	IsRecord bool
+}
+
+// CSharpProperty represents a C# property definition.
+type CSharpProperty struct {
+	// Name is the property name
+	Name string
+
+	// Type is the property type
+	Type string
+
+	// Attributes are the property attributes (e.g., [Required])
+	Attributes []CSharpAttribute
+
+	// IsRequired indicates if the property is required (non-nullable or has Required attribute)
+	IsRequired bool
+
 	// Line is the source line number
 	Line int
 }
@@ -95,6 +119,9 @@ type ParsedCSharpFile struct {
 	// Classes are the extracted class definitions
 	Classes []CSharpClass
 
+	// Records are the extracted record definitions
+	Records []CSharpClass
+
 	// Usings are the using statements
 	Usings []string
 
@@ -125,11 +152,21 @@ var (
 	// Matches class definitions with optional attributes
 	csharpClassRegex = regexp.MustCompile(`(?ms)((?:\[[^\]]+\]\s*)*)\s*(public|internal|private|protected)?\s*(abstract|sealed|static|partial)?\s*class\s+(\w+)(?:\s*:\s*([^{]+))?`)
 
+	// Matches record definitions with positional parameters: record Name(Type Prop, ...);
+	// e.g., public record User(int Id, string Name, string Email);
+	csharpRecordRegex = regexp.MustCompile(`(?m)(public|internal|private|protected)?\s*record\s+(\w+)\s*\(([^)]*)\)\s*;`)
+
+	// Matches record class/struct definitions with body: record class Name { ... }
+	csharpRecordClassRegex = regexp.MustCompile(`(?ms)(public|internal|private|protected)?\s*record\s+(class|struct)?\s*(\w+)(?:\s*\(([^)]*)\))?(?:\s*:\s*([^{]+))?`)
+
 	// Matches attributes
 	csharpAttributeRegex = regexp.MustCompile(`\[(\w+)(?:\s*\(([^)]*)\))?\]`)
 
 	// Matches method definitions with optional attributes
 	csharpMethodRegex = regexp.MustCompile(`(?ms)((?:\[[^\]]+\]\s*)*)\s*(public|private|protected|internal)?\s*(async)?\s*(static)?\s*([\w<>,\s\[\]?]+)\s+(\w+)\s*\(([^)]*)\)`)
+
+	// Matches property definitions: public Type Name { get; set; }
+	csharpPropertyRegex = regexp.MustCompile(`(?m)((?:\[[^\]]+\]\s*)*)\s*(public|private|protected|internal)?\s*([\w<>,\[\]?]+)\s+(\w+)\s*\{\s*get\s*;`)
 
 	// Matches minimal API route definitions
 	csharpMinimalAPIRegex = regexp.MustCompile(`(?m)(?:app|builder\.Services)\s*\.\s*Map(Get|Post|Put|Delete|Patch)\s*\(\s*"([^"]+)"`)
@@ -142,6 +179,7 @@ func (p *CSharpParser) Parse(filename string, content []byte) *ParsedCSharpFile 
 		Path:             filename,
 		Content:          src,
 		Classes:          []CSharpClass{},
+		Records:          []CSharpClass{},
 		Usings:           []string{},
 		MinimalAPIRoutes: []CSharpMinimalRoute{},
 	}
@@ -151,6 +189,9 @@ func (p *CSharpParser) Parse(filename string, content []byte) *ParsedCSharpFile 
 
 	// Extract classes
 	pf.Classes = p.extractClasses(src)
+
+	// Extract records
+	pf.Records = p.extractRecords(src)
 
 	// Extract minimal API routes
 	pf.MinimalAPIRoutes = p.extractMinimalAPIRoutes(src)
@@ -212,11 +253,12 @@ func (p *CSharpParser) extractClasses(src string) []CSharpClass {
 			}
 		}
 
-		// Find the class body and extract methods
+		// Find the class body and extract methods and properties
 		classStart := match[0]
 		classBody := p.findClassBody(src[classStart:])
 		if classBody != "" {
 			class.Methods = p.extractMethods(classBody, line)
+			class.Properties = p.extractClassProperties(classBody, line)
 		}
 
 		if class.Name != "" {
@@ -225,6 +267,164 @@ func (p *CSharpParser) extractClasses(src string) []CSharpClass {
 	}
 
 	return classes
+}
+
+// extractRecords extracts record definitions from C# source.
+func (p *CSharpParser) extractRecords(src string) []CSharpClass {
+	var records []CSharpClass
+
+	// Extract positional record definitions: record Name(Type Prop, ...);
+	matches := csharpRecordRegex.FindAllStringSubmatchIndex(src, -1)
+	for _, match := range matches {
+		if len(match) < 8 {
+			continue
+		}
+
+		line := countLines(src[:match[0]])
+
+		record := CSharpClass{
+			Line:        line,
+			IsRecord:    true,
+			Attributes:  []CSharpAttribute{},
+			BaseClasses: []string{},
+			Methods:     []CSharpMethod{},
+			Properties:  []CSharpProperty{},
+		}
+
+		// Extract record name (group 2)
+		if match[4] >= 0 && match[5] >= 0 {
+			record.Name = src[match[4]:match[5]]
+		}
+
+		// Extract parameters and convert to properties (group 3)
+		if match[6] >= 0 && match[7] >= 0 {
+			paramStr := src[match[6]:match[7]]
+			record.Properties = p.extractRecordProperties(paramStr, line)
+		}
+
+		if record.Name != "" {
+			records = append(records, record)
+		}
+	}
+
+	return records
+}
+
+// extractRecordProperties converts record positional parameters to properties.
+// e.g., "int Id, string Name, string Email" -> [Property{Name: "Id", Type: "int"}, ...]
+func (p *CSharpParser) extractRecordProperties(paramStr string, lineOffset int) []CSharpProperty {
+	var properties []CSharpProperty
+
+	if strings.TrimSpace(paramStr) == "" {
+		return properties
+	}
+
+	// Split by comma, handling generics
+	params := splitParameters(paramStr)
+
+	for _, param := range params {
+		param = strings.TrimSpace(param)
+		if param == "" {
+			continue
+		}
+
+		// Parse "Type Name" format (e.g., "int Id", "string Name", "List<int> Ids")
+		// Handle attributes on parameters
+		attrMatches := csharpAttributeRegex.FindAllStringSubmatch(param, -1)
+		var attrs []CSharpAttribute
+		for _, am := range attrMatches {
+			if len(am) >= 2 {
+				attr := CSharpAttribute{Name: am[1]}
+				if len(am) > 2 && am[2] != "" {
+					attr.Arguments = append(attr.Arguments, strings.Trim(am[2], `"`))
+				}
+				attrs = append(attrs, attr)
+			}
+		}
+
+		// Remove attributes from param string
+		cleanParam := csharpAttributeRegex.ReplaceAllString(param, "")
+		cleanParam = strings.TrimSpace(cleanParam)
+
+		// Split into type and name
+		parts := strings.Fields(cleanParam)
+		if len(parts) < 2 {
+			continue
+		}
+
+		// The last part is the name, everything before is the type
+		propName := parts[len(parts)-1]
+		propType := strings.Join(parts[:len(parts)-1], " ")
+
+		// Check if property is required (non-nullable type or has Required attribute)
+		isRequired := !strings.HasSuffix(propType, "?")
+		for _, attr := range attrs {
+			if attr.Name == "Required" {
+				isRequired = true
+				break
+			}
+		}
+
+		properties = append(properties, CSharpProperty{
+			Name:       propName,
+			Type:       propType,
+			Attributes: attrs,
+			IsRequired: isRequired,
+			Line:       lineOffset,
+		})
+	}
+
+	return properties
+}
+
+// extractClassProperties extracts property definitions from a class body.
+func (p *CSharpParser) extractClassProperties(body string, baseLineOffset int) []CSharpProperty {
+	var properties []CSharpProperty
+
+	matches := csharpPropertyRegex.FindAllStringSubmatchIndex(body, -1)
+	for _, match := range matches {
+		if len(match) < 10 {
+			continue
+		}
+
+		line := baseLineOffset + countLines(body[:match[0]])
+
+		prop := CSharpProperty{
+			Line:       line,
+			Attributes: []CSharpAttribute{},
+		}
+
+		// Extract attributes (group 1)
+		if match[2] >= 0 && match[3] >= 0 {
+			attrStr := body[match[2]:match[3]]
+			prop.Attributes = p.extractAttributes(attrStr)
+		}
+
+		// Extract type (group 3)
+		if match[6] >= 0 && match[7] >= 0 {
+			prop.Type = strings.TrimSpace(body[match[6]:match[7]])
+		}
+
+		// Extract name (group 4)
+		if match[8] >= 0 && match[9] >= 0 {
+			prop.Name = body[match[8]:match[9]]
+		}
+
+		// Check if required
+		prop.IsRequired = !strings.HasSuffix(prop.Type, "?")
+		for _, attr := range prop.Attributes {
+			if attr.Name == "Required" {
+				prop.IsRequired = true
+				break
+			}
+		}
+
+		if prop.Name != "" {
+			properties = append(properties, prop)
+		}
+	}
+
+	return properties
 }
 
 // findClassBody finds the body of a class (between { and }).

@@ -394,6 +394,54 @@ func TestPlugin_ExtractRoutes_SourceInfo(t *testing.T) {
 func TestPlugin_ExtractSchemas(t *testing.T) {
 	p := New()
 
+	// Test with Ecto schema
+	schemaContent := `
+defmodule MyApp.Schemas.User do
+  use Ecto.Schema
+
+  schema "users" do
+    field :name, :string
+    field :email, :string
+    field :age, :integer
+    field :active, :boolean, default: true
+  end
+end
+`
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "lib/my_app/schemas/user.ex",
+			Language: "elixir",
+			Content:  []byte(schemaContent),
+		},
+	}
+
+	schemas, err := p.ExtractSchemas(files)
+	require.NoError(t, err)
+	require.Len(t, schemas, 1)
+
+	schema := schemas[0]
+	assert.Equal(t, "User", schema.Title)
+	assert.Equal(t, "object", schema.Type)
+	assert.Len(t, schema.Properties, 4)
+
+	// Check field types
+	assert.Equal(t, "string", schema.Properties["name"].Type)
+	assert.Equal(t, "string", schema.Properties["email"].Type)
+	assert.Equal(t, "integer", schema.Properties["age"].Type)
+	assert.Equal(t, "boolean", schema.Properties["active"].Type)
+
+	// Fields without defaults should be required
+	assert.Contains(t, schema.Required, "name")
+	assert.Contains(t, schema.Required, "email")
+	assert.Contains(t, schema.Required, "age")
+	// active has a default, so not required
+	assert.NotContains(t, schema.Required, "active")
+}
+
+func TestPlugin_ExtractSchemas_Empty(t *testing.T) {
+	p := New()
+
 	files := []scanner.SourceFile{
 		{
 			Path:     "lib/my_app/user.ex",
@@ -402,10 +450,120 @@ func TestPlugin_ExtractSchemas(t *testing.T) {
 		},
 	}
 
-	// Phoenix doesn't have standard schema extraction
+	// No Ecto schema in this file
 	schemas, err := p.ExtractSchemas(files)
 	require.NoError(t, err)
 	assert.Empty(t, schemas)
+}
+
+func TestPlugin_ExtractSchemas_EmbeddedSchema(t *testing.T) {
+	p := New()
+
+	content := `
+defmodule MyApp.Error do
+  use Ecto.Schema
+
+  @primary_key false
+  embedded_schema do
+    field :code, :string
+    field :message, :string
+  end
+end
+`
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "lib/my_app/error.ex",
+			Language: "elixir",
+			Content:  []byte(content),
+		},
+	}
+
+	schemas, err := p.ExtractSchemas(files)
+	require.NoError(t, err)
+	require.Len(t, schemas, 1)
+
+	schema := schemas[0]
+	assert.Equal(t, "Error", schema.Title)
+	assert.Len(t, schema.Properties, 2)
+}
+
+func TestPlugin_ExtractSchemas_MultipleFiles(t *testing.T) {
+	p := New()
+
+	userContent := `
+defmodule MyApp.User do
+  use Ecto.Schema
+
+  schema "users" do
+    field :name, :string
+  end
+end
+`
+
+	postContent := `
+defmodule MyApp.Post do
+  use Ecto.Schema
+
+  schema "posts" do
+    field :title, :string
+    field :body, :string
+  end
+end
+`
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "lib/my_app/user.ex",
+			Language: "elixir",
+			Content:  []byte(userContent),
+		},
+		{
+			Path:     "lib/my_app/post.ex",
+			Language: "elixir",
+			Content:  []byte(postContent),
+		},
+	}
+
+	schemas, err := p.ExtractSchemas(files)
+	require.NoError(t, err)
+	require.Len(t, schemas, 2)
+
+	// Find schemas by name
+	schemaNames := make(map[string]bool)
+	for _, s := range schemas {
+		schemaNames[s.Title] = true
+	}
+	assert.True(t, schemaNames["User"])
+	assert.True(t, schemaNames["Post"])
+}
+
+func TestPlugin_EctoTypeToJSONSchema(t *testing.T) {
+	p := New()
+
+	tests := []struct {
+		ectoType     string
+		expectedType string
+		expectedFmt  string
+	}{
+		{"string", "string", ""},
+		{"integer", "integer", ""},
+		{"float", "number", ""},
+		{"boolean", "boolean", ""},
+		{"date", "string", "date"},
+		{"datetime", "string", "date-time"},
+		{"utc_datetime", "string", "date-time"},
+		{"uuid", "string", "uuid"},
+		{"map", "object", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.ectoType, func(t *testing.T) {
+			schema := p.ectoTypeToJSONSchema(tt.ectoType)
+			assert.Equal(t, tt.expectedType, schema.Type)
+			assert.Equal(t, tt.expectedFmt, schema.Format)
+		})
+	}
 }
 
 func TestConvertPhoenixPathParams(t *testing.T) {

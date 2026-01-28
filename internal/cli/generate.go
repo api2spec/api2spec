@@ -18,25 +18,38 @@ import (
 	_ "github.com/api2spec/api2spec/internal/plugins/aspnet"  // Register aspnet plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/axum"    // Register axum plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/chi"     // Register chi plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/crow"    // Register crow plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/drf"     // Register drf plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/drogon"  // Register drogon plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/echo"    // Register echo plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/elysia"  // Register elysia plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/express" // Register express plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/fastapi" // Register fastapi plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/fastify" // Register fastify plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/fiber"   // Register fiber plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/fastendpoints" // Register fastendpoints plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/flask"   // Register flask plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/gin"     // Register gin plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/gleam"   // Register gleam plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/hono"    // Register hono plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/koa"     // Register koa plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/ktor"    // Register ktor plugin
-	_ "github.com/api2spec/api2spec/internal/plugins/laravel" // Register laravel plugin
-	_ "github.com/api2spec/api2spec/internal/plugins/nestjs"  // Register nestjs plugin
-	_ "github.com/api2spec/api2spec/internal/plugins/phoenix" // Register phoenix plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/laravel"    // Register laravel plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/micronaut" // Register micronaut plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/nancy"     // Register nancy plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/nestjs"    // Register nestjs plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/oatpp"     // Register oatpp plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/phoenix"  // Register phoenix plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/play"     // Register play plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/rails"   // Register rails plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/rocket"  // Register rocket plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/sinatra" // Register sinatra plugin
 	_ "github.com/api2spec/api2spec/internal/plugins/spring"  // Register spring plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/slim"    // Register slim plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/symfony" // Register symfony plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/tapir"   // Register tapir plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/vapor"   // Register vapor plugin
+	_ "github.com/api2spec/api2spec/internal/plugins/servant" // Register servant plugin
 	"github.com/api2spec/api2spec/internal/scanner"
 	"github.com/api2spec/api2spec/pkg/types"
 )

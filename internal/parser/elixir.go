@@ -119,6 +119,45 @@ type ElixirResource struct {
 	Line int
 }
 
+// EctoSchema represents an Ecto schema definition.
+type EctoSchema struct {
+	// ModuleName is the full module name containing the schema
+	ModuleName string
+
+	// TableName is the database table name (from schema "table_name" do)
+	TableName string
+
+	// Fields are the schema field definitions
+	Fields []EctoField
+
+	// IsEmbedded indicates if this is an embedded_schema
+	IsEmbedded bool
+
+	// Line is the source line number
+	Line int
+
+	// SourceFile is the file path
+	SourceFile string
+}
+
+// EctoField represents an Ecto schema field.
+type EctoField struct {
+	// Name is the field name
+	Name string
+
+	// Type is the Ecto type (:string, :integer, :boolean, etc.)
+	Type string
+
+	// Default is the default value if specified
+	Default string
+
+	// HasDefault indicates if a default value was specified
+	HasDefault bool
+
+	// Line is the source line number
+	Line int
+}
+
 // ParsedElixirFile represents a parsed Elixir source file.
 type ParsedElixirFile struct {
 	// Path is the file path
@@ -138,6 +177,9 @@ type ParsedElixirFile struct {
 
 	// Resources are the extracted resource definitions
 	Resources []ElixirResource
+
+	// Schemas are the extracted Ecto schema definitions
+	Schemas []EctoSchema
 }
 
 // Regex patterns for Elixir parsing
@@ -168,6 +210,15 @@ var (
 
 	// Matches pipe_through declarations
 	elixirPipeThroughRegex = regexp.MustCompile(`(?m)pipe_through\s+(?::(\w+)|\[([^\]]+)\])`)
+
+	// Matches Ecto schema definitions: schema "table_name" do
+	elixirSchemaRegex = regexp.MustCompile(`(?m)^\s*schema\s+"([^"]+)"\s+do`)
+
+	// Matches Ecto embedded_schema definitions: embedded_schema do
+	elixirEmbeddedSchemaRegex = regexp.MustCompile(`(?m)^\s*embedded_schema\s+do`)
+
+	// Matches Ecto field definitions: field :name, :type or field :name, :type, default: value
+	elixirFieldRegex = regexp.MustCompile(`(?m)^\s*field\s+:(\w+)\s*,\s*:(\w+)(?:\s*,\s*default:\s*(.+))?`)
 )
 
 // Parse parses Elixir source code.
@@ -180,6 +231,7 @@ func (p *ElixirParser) Parse(filename string, content []byte) *ParsedElixirFile 
 		Routes:    []ElixirRoute{},
 		Scopes:    []ElixirScope{},
 		Resources: []ElixirResource{},
+		Schemas:   []EctoSchema{},
 	}
 
 	// Extract modules
@@ -189,6 +241,9 @@ func (p *ElixirParser) Parse(filename string, content []byte) *ParsedElixirFile 
 	pf.Routes = p.extractRoutes(src)
 	pf.Scopes = p.extractScopes(src)
 	pf.Resources = p.extractResources(src)
+
+	// Extract Ecto schemas
+	pf.Schemas = p.extractEctoSchemas(src, filename)
 
 	return pf
 }
@@ -538,6 +593,141 @@ func (p *ElixirParser) extractResources(src string) []ElixirResource {
 	}
 
 	return resources
+}
+
+// extractEctoSchemas extracts Ecto schema definitions from Elixir source.
+func (p *ElixirParser) extractEctoSchemas(src string, filename string) []EctoSchema {
+	var schemas []EctoSchema
+
+	// First, find the module name
+	moduleName := ""
+	moduleMatches := elixirModuleRegex.FindStringSubmatch(src)
+	if len(moduleMatches) > 1 {
+		moduleName = moduleMatches[1]
+	}
+
+	// Check for regular schema definitions: schema "table_name" do
+	schemaMatches := elixirSchemaRegex.FindAllStringSubmatchIndex(src, -1)
+	for _, match := range schemaMatches {
+		if len(match) < 4 {
+			continue
+		}
+
+		line := countLines(src[:match[0]])
+		tableName := ""
+		if match[2] >= 0 && match[3] >= 0 {
+			tableName = src[match[2]:match[3]]
+		}
+
+		// Find the schema body (do...end block)
+		schemaStart := match[0]
+		schemaBody := p.findSchemaBody(src[schemaStart:])
+
+		schema := EctoSchema{
+			ModuleName: moduleName,
+			TableName:  tableName,
+			Fields:     p.extractEctoFields(schemaBody, line),
+			IsEmbedded: false,
+			Line:       line,
+			SourceFile: filename,
+		}
+
+		if len(schema.Fields) > 0 || tableName != "" {
+			schemas = append(schemas, schema)
+		}
+	}
+
+	// Check for embedded_schema definitions: embedded_schema do
+	embeddedMatches := elixirEmbeddedSchemaRegex.FindAllStringSubmatchIndex(src, -1)
+	for _, match := range embeddedMatches {
+		line := countLines(src[:match[0]])
+
+		// Find the schema body
+		schemaStart := match[0]
+		schemaBody := p.findSchemaBody(src[schemaStart:])
+
+		schema := EctoSchema{
+			ModuleName: moduleName,
+			TableName:  "",
+			Fields:     p.extractEctoFields(schemaBody, line),
+			IsEmbedded: true,
+			Line:       line,
+			SourceFile: filename,
+		}
+
+		if len(schema.Fields) > 0 {
+			schemas = append(schemas, schema)
+		}
+	}
+
+	return schemas
+}
+
+// findSchemaBody finds the body of a schema block (between do and end).
+func (p *ElixirParser) findSchemaBody(src string) string {
+	doIdx := strings.Index(src, " do")
+	if doIdx == -1 {
+		doIdx = strings.Index(src, "\n    do")
+	}
+	if doIdx == -1 {
+		return ""
+	}
+
+	// Find matching end - schemas are typically simple blocks
+	start := doIdx + 4
+	endIdx := strings.Index(src[start:], "\n  end")
+	if endIdx == -1 {
+		endIdx = strings.Index(src[start:], "\nend")
+	}
+	if endIdx == -1 {
+		// Try to find any end
+		endIdx = strings.Index(src[start:], "end")
+	}
+	if endIdx == -1 {
+		return ""
+	}
+
+	return src[start : start+endIdx]
+}
+
+// extractEctoFields extracts field definitions from a schema body.
+func (p *ElixirParser) extractEctoFields(src string, baseLineOffset int) []EctoField {
+	var fields []EctoField
+
+	matches := elixirFieldRegex.FindAllStringSubmatchIndex(src, -1)
+	for _, match := range matches {
+		if len(match) < 6 {
+			continue
+		}
+
+		line := baseLineOffset + countLines(src[:match[0]])
+
+		field := EctoField{
+			Line: line,
+		}
+
+		// Extract field name (group 1)
+		if match[2] >= 0 && match[3] >= 0 {
+			field.Name = src[match[2]:match[3]]
+		}
+
+		// Extract field type (group 2)
+		if match[4] >= 0 && match[5] >= 0 {
+			field.Type = src[match[4]:match[5]]
+		}
+
+		// Extract default value (group 3) if present
+		if len(match) >= 8 && match[6] >= 0 && match[7] >= 0 {
+			field.Default = strings.TrimSpace(src[match[6]:match[7]])
+			field.HasDefault = true
+		}
+
+		if field.Name != "" && field.Type != "" {
+			fields = append(fields, field)
+		}
+	}
+
+	return fields
 }
 
 // IsSupported returns whether Elixir parsing is supported.

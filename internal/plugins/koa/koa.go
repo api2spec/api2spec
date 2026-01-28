@@ -534,8 +534,10 @@ func (p *Plugin) walkNodes(node *sitter.Node, fn func(*sitter.Node) bool) {
 	}
 }
 
-// ExtractSchemas extracts schema definitions from Zod schemas in TypeScript files.
+// ExtractSchemas extracts schema definitions from TypeScript interfaces and Zod schemas.
 func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
+	tsExtractor := schema.NewTypeScriptSchemaExtractor()
+
 	for _, file := range files {
 		if file.Language != "typescript" && file.Language != "javascript" {
 			continue
@@ -546,7 +548,12 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 			continue
 		}
 
-		// Extract and register Zod schemas
+		// Extract TypeScript interfaces
+		for _, iface := range pf.Interfaces {
+			tsExtractor.ExtractAndRegister(iface)
+		}
+
+		// Extract Zod schemas (if any)
 		for _, zs := range pf.ZodSchemas {
 			p.zodParser.ExtractAndRegister(zs.Name, zs.Node, file.Content)
 		}
@@ -554,7 +561,10 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 		pf.Close()
 	}
 
-	return p.zodParser.Registry().ToSlice(), nil
+	// Merge Zod schemas into the registry
+	tsExtractor.Registry().Merge(p.zodParser.Registry())
+
+	return tsExtractor.Registry().ToSlice(), nil
 }
 
 // --- Helper Functions ---

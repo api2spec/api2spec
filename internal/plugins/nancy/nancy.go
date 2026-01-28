@@ -17,6 +17,7 @@ import (
 	"github.com/api2spec/api2spec/internal/parser"
 	"github.com/api2spec/api2spec/internal/plugins"
 	"github.com/api2spec/api2spec/internal/scanner"
+	"github.com/api2spec/api2spec/internal/util"
 	"github.com/api2spec/api2spec/pkg/types"
 )
 
@@ -337,7 +338,7 @@ func inferTags(path, moduleName string) []string {
 	return []string{tagPart}
 }
 
-// ExtractSchemas extracts schema definitions from C# classes.
+// ExtractSchemas extracts schema definitions from C# classes and records.
 func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, error) {
 	var schemas []types.Schema
 
@@ -348,9 +349,21 @@ func (p *Plugin) ExtractSchemas(files []scanner.SourceFile) ([]types.Schema, err
 
 		pf := p.csParser.Parse(file.Path, file.Content)
 
+		// Extract schemas from records (e.g., record User(int Id, string Name))
+		for _, record := range pf.Records {
+			schema := p.recordToSchema(record)
+			if schema != nil {
+				schemas = append(schemas, *schema)
+			}
+		}
+
+		// Extract schemas from classes with properties
 		for _, cls := range pf.Classes {
-			// Look for DTO/Model classes
-			if p.isSchemaClass(cls) {
+			// Include classes with properties or common DTO naming patterns
+			hasProperties := len(cls.Properties) > 0
+			isNamedAsDTO := p.isSchemaClass(cls)
+
+			if hasProperties || isNamedAsDTO {
 				schema := p.classToSchema(cls)
 				if schema != nil {
 					schemas = append(schemas, *schema)
@@ -377,6 +390,45 @@ func (p *Plugin) isSchemaClass(cls parser.CSharpClass) bool {
 	return false
 }
 
+// recordToSchema converts a C# record to an OpenAPI schema.
+func (p *Plugin) recordToSchema(record parser.CSharpClass) *types.Schema {
+	schema := &types.Schema{
+		Title:      record.Name,
+		Type:       "object",
+		Properties: make(map[string]*types.Schema),
+		Required:   []string{},
+	}
+
+	// Convert record properties to schema properties
+	for _, prop := range record.Properties {
+		propName := util.ToLowerCamelCase(prop.Name)
+		openAPIType, format := parser.CSharpTypeToOpenAPI(prop.Type)
+
+		propSchema := &types.Schema{
+			Type:   openAPIType,
+			Format: format,
+		}
+
+		// Handle array types
+		if openAPIType == "array" {
+			innerType := util.ExtractInnerType(prop.Type)
+			itemType, itemFormat := parser.CSharpTypeToOpenAPI(innerType)
+			propSchema.Items = &types.Schema{
+				Type:   itemType,
+				Format: itemFormat,
+			}
+		}
+
+		schema.Properties[propName] = propSchema
+
+		if prop.IsRequired {
+			schema.Required = append(schema.Required, propName)
+		}
+	}
+
+	return schema
+}
+
 // classToSchema converts a C# class to an OpenAPI schema.
 func (p *Plugin) classToSchema(cls parser.CSharpClass) *types.Schema {
 	schema := &types.Schema{
@@ -386,8 +438,50 @@ func (p *Plugin) classToSchema(cls parser.CSharpClass) *types.Schema {
 		Required:   []string{},
 	}
 
-	// The CSharpParser extracts methods but not properties directly
-	// This would need enhancement to the parser for full property extraction
+	// Extract properties from class properties
+	for _, prop := range cls.Properties {
+		propName := util.ToLowerCamelCase(prop.Name)
+		openAPIType, format := parser.CSharpTypeToOpenAPI(prop.Type)
+
+		propSchema := &types.Schema{
+			Type:   openAPIType,
+			Format: format,
+		}
+
+		// Handle array types
+		if openAPIType == "array" {
+			innerType := util.ExtractInnerType(prop.Type)
+			itemType, itemFormat := parser.CSharpTypeToOpenAPI(innerType)
+			propSchema.Items = &types.Schema{
+				Type:   itemType,
+				Format: itemFormat,
+			}
+		}
+
+		schema.Properties[propName] = propSchema
+
+		if prop.IsRequired {
+			schema.Required = append(schema.Required, propName)
+		}
+	}
+
+	// Fallback: Extract properties from methods that look like getters
+	if len(schema.Properties) == 0 {
+		for _, method := range cls.Methods {
+			if strings.HasPrefix(method.Name, "get_") {
+				propName := util.ToLowerCamelCase(strings.TrimPrefix(method.Name, "get_"))
+				openAPIType, format := parser.CSharpTypeToOpenAPI(method.ReturnType)
+
+				propSchema := &types.Schema{
+					Type:   openAPIType,
+					Format: format,
+				}
+
+				schema.Properties[propName] = propSchema
+			}
+		}
+	}
+
 	return schema
 }
 

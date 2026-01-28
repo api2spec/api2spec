@@ -165,6 +165,40 @@ public class ItemController {
 }
 `
 
+// springRecordCode tests Java record extraction.
+const springRecordCode = `
+package com.example.demo.model;
+
+public record User(int id, String name, String email) {}
+
+public record Post(int id, int userId, String title, String body) {}
+
+public record Product(
+    Long id,
+    String name,
+    Double price,
+    Boolean inStock
+) {}
+`
+
+// springModelDirCode tests extraction from model directory.
+const springModelDirCode = `
+package com.example.demo.model;
+
+public class Item {
+    private Long id;
+    private String name;
+    private Double price;
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public Double getPrice() { return price; }
+    public void setPrice(Double price) { this.price = price; }
+}
+`
+
 func TestPlugin_Name(t *testing.T) {
 	p := New()
 	assert.Equal(t, "spring", p.Name())
@@ -474,6 +508,84 @@ func TestPlugin_ExtractSchemas_DTOs(t *testing.T) {
 	if len(schemas) > 0 {
 		assert.True(t, schemaNames["UserDto"] || schemaNames["CreateUserRequest"])
 	}
+}
+
+func TestPlugin_ExtractSchemas_Records(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "src/main/java/com/example/demo/model/User.java",
+			Language: "java",
+			Content:  []byte(springRecordCode),
+		},
+	}
+
+	schemas, err := p.ExtractSchemas(files)
+	require.NoError(t, err)
+
+	// Should extract records
+	assert.GreaterOrEqual(t, len(schemas), 3, "Should extract at least 3 record schemas")
+
+	schemaMap := make(map[string]*types.Schema)
+	for i := range schemas {
+		schemaMap[schemas[i].Title] = &schemas[i]
+	}
+
+	// Check User record
+	userSchema := schemaMap["User"]
+	require.NotNil(t, userSchema, "User schema should be extracted")
+	assert.Equal(t, "object", userSchema.Type)
+	assert.Contains(t, userSchema.Properties, "id")
+	assert.Contains(t, userSchema.Properties, "name")
+	assert.Contains(t, userSchema.Properties, "email")
+	assert.Equal(t, "integer", userSchema.Properties["id"].Type)
+	assert.Equal(t, "string", userSchema.Properties["name"].Type)
+	// Record fields should be required
+	assert.Contains(t, userSchema.Required, "id")
+	assert.Contains(t, userSchema.Required, "name")
+	assert.Contains(t, userSchema.Required, "email")
+
+	// Check Post record
+	postSchema := schemaMap["Post"]
+	require.NotNil(t, postSchema, "Post schema should be extracted")
+	assert.Contains(t, postSchema.Properties, "id")
+	assert.Contains(t, postSchema.Properties, "userId")
+	assert.Contains(t, postSchema.Properties, "title")
+	assert.Contains(t, postSchema.Properties, "body")
+
+	// Check Product record with more types
+	productSchema := schemaMap["Product"]
+	require.NotNil(t, productSchema, "Product schema should be extracted")
+	assert.Equal(t, "integer", productSchema.Properties["id"].Type)
+	assert.Equal(t, "string", productSchema.Properties["name"].Type)
+	assert.Equal(t, "number", productSchema.Properties["price"].Type)
+	assert.Equal(t, "boolean", productSchema.Properties["inStock"].Type)
+}
+
+func TestPlugin_ExtractSchemas_ModelDirectory(t *testing.T) {
+	p := New()
+
+	files := []scanner.SourceFile{
+		{
+			Path:     "src/main/java/com/example/demo/model/Item.java",
+			Language: "java",
+			Content:  []byte(springModelDirCode),
+		},
+	}
+
+	schemas, err := p.ExtractSchemas(files)
+	require.NoError(t, err)
+
+	// Should extract classes from model directory
+	assert.GreaterOrEqual(t, len(schemas), 1, "Should extract at least 1 schema from model directory")
+
+	schemaNames := make(map[string]bool)
+	for _, s := range schemas {
+		schemaNames[s.Title] = true
+	}
+
+	assert.True(t, schemaNames["Item"], "Item class from model directory should be extracted")
 }
 
 func TestConvertSpringPathParams(t *testing.T) {
